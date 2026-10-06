@@ -3,13 +3,13 @@ Module to handle query (contigs) and target (features) IO.
 """
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import Union, IO, Iterator, Optional
+from typing import Union, IO, Iterator, Optional, Iterable
 from pathlib import Path
 from re import compile as re_compile
 from gzip import open as gzopen
 from bz2 import open as bzopen
 from lzma import open as lzopen
-from sys import stdout
+from sys import stdout, stderr
 
 from Bio.Seq import Seq
 from Bio.SeqIO.FastaIO import FastaIterator
@@ -23,6 +23,149 @@ from eris.alignment import Cigar
 from eris.graph import Edge
 from eris.interval import Strand
 from eris.constants import FeatureType
+
+
+# IS synonym helpers ---------------------------------------------------------------------------------------------------
+
+_IS_BASE_RE = re_compile(r'^(IS\d+)[A-Za-z]*$')
+
+
+def _is_element_base(target_name: str) -> str:
+    """Return the canonical IS element base for a target name.
+
+    Extracts the element identifier (first '_'-delimited field) and strips
+    any trailing letter suffix so that variant names collapse to their family root.
+
+    Examples::
+
+        'IS30D_IS30_unknown'  → 'IS30'
+        'IS1A_IS1_unknown'    → 'IS1'
+        'IS30_IS30_unknown'   → 'IS30'
+        'IS1203_IS3_IS51'     → 'IS1203'  (no suffix → unchanged)
+    """
+    element = target_name.split('_')[0]
+    m = _IS_BASE_RE.match(element)
+    return m.group(1) if m else element
+
+
+def _group_synonyms(names: Iterable[str]) -> dict[str, list[str]]:
+    """Group IS target names by their canonical base IS element.
+
+    Returns a mapping of base_name → list-of-target-names for every group
+    that contains more than one member (i.e. genuine synonym sets).
+    Single-member groups are omitted.
+    """
+    groups: dict[str, list[str]] = {}
+    for name in names:
+        base = _is_element_base(name)
+        groups.setdefault(base, []).append(name)
+    return {base: members for base, members in groups.items() if len(members) > 1}
+
+
+# Gene output filtering (_cds.fna, _proteins.faa) ----------------------------------------------------------------------
+
+_FNA_HEADER_RE = re_compile(
+    r'^>(?P<idtok>\S+)\s+(?P<contig>.+):(?P<start>\d+)-(?P<end>\d+)\s+strand=(?P<strand>[+-])\s*$'
+)
+_FNA_IDTOK_RE = re_compile(r'^(?P<base>.*)_FGS_(?P<n>\d+)$')
+_HEADER_UNSAFE_RE = re_compile(r'[^\w.-]')
+
+
+def _sanitize_header_token(token: str) -> str:
+    """Replaces characters unsafe/confusing in a FASTA header id (e.g. '/') with '_'."""
+    return _HEADER_UNSAFE_RE.sub('_', token)
+
+
+def _load_locus_lookup(report_path: str) -> Optional[dict[str, tuple[str, str]]]:
+    """Builds a `{contig}_{start}_{end}` (0-based) -> (target, context) lookup from `_report.tsv`.
+
+    Returns None if the report is missing or malformed; an empty dict if it has no usable rows.
+    """
+    if not Path(report_path).exists():
+        return None
+
+    lookup: dict[str, tuple[str, str]] = {}
+    with open(report_path) as fh:
+        header_cols = fh.readline().rstrip("\n").split("\t")
+        try:
+            gid_i = header_cols.index("gene_id")
+            ctx_i = header_cols.index("context")
+            tgt_i = header_cols.index("target")
+        except ValueError:
+            return None
+        for line in fh:
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) <= max(gid_i, ctx_i, tgt_i):
+                continue
+            context = fields[ctx_i]
+            if context == "NONE":
+                continue
+            lookup.setdefault(fields[gid_i], (_sanitize_header_token(fields[tgt_i]), context))
+
+    return lookup
+
+
+def _rewrite_fgs_headers(path: str, lookup: dict[str, tuple[str, str]]) -> None:
+    """Filters and rewrites pyfgs-style FASTA records (`_cds.fna` or `_proteins.faa`) in place.
+
+    Keeps only records whose coordinates match a locus-related gene in `lookup` (i.e. genes
+    reported in `_report.tsv` as INSIDE/flanking an IS), dropping all other assembly-wide CDS.
+    Kept headers are named `{target}_{context}_{contig}_FGS_{n}` (n = pyfgs's per-contig gene
+    index, so the contig keeps names unique) and display 0-based coordinates
+    (matching `_report.tsv`'s gene_id) instead of pyfgs's default 1-based display.
+    """
+    keep = False
+    tmp_path = f"{path}.tmp"
+    with open(path) as src, open(tmp_path, "w") as dst:
+        for line in src:
+            if not line.startswith(">"):
+                if keep:
+                    dst.write(line)
+                continue
+
+            m = _FNA_HEADER_RE.match(line.rstrip("\n"))
+            if not m:
+                keep = False
+                continue
+
+            idtok, contig, start, end, strand = m.group("idtok", "contig", "start", "end", "strand")
+            start0 = int(start) - 1
+            hit = lookup.get(f"{contig}_{start0}_{end}")
+            keep = hit is not None
+            if not keep:
+                continue
+
+            idm = _FNA_IDTOK_RE.match(idtok)
+            n = idm.group("n") if idm else "1"
+            dst.write(f">{hit[0]}_{hit[1]}_{_sanitize_header_token(contig)}_FGS_{n} {contig}:{start0}-{end} strand={strand}\n")
+
+    Path(tmp_path).replace(path)
+
+
+def _filter_gene_outputs(prefix: str) -> None:
+    """Reduces `{prefix}_cds.fna` and `{prefix}_proteins.faa` to the IS-related genes listed in
+    `{prefix}_report.tsv`, tagging their headers with locus target/context (0-based coordinates).
+    `{prefix}_assembly.gff` is left untouched and keeps all assembly-wide genes.
+
+    Best-effort: any failure is logged to stderr and leaves the files untouched rather
+    than crashing the pipeline after it has already produced valid output.
+    """
+    try:
+        _do_filter_gene_outputs(prefix)
+    except Exception as e:
+        stderr.write(f"[eris] _filter_gene_outputs failed ({type(e).__name__}: {e}); gene files left unchanged\n")
+
+
+def _do_filter_gene_outputs(prefix: str) -> None:
+    report_path = f"{prefix}_report.tsv"
+    lookup = _load_locus_lookup(report_path)
+    if lookup is None:
+        return
+
+    for path in (f"{prefix}_cds.fna", f"{prefix}_proteins.faa"):
+        if not Path(path).exists():
+            continue
+        _rewrite_fgs_headers(path, lookup)
 
 
 # Base classes ---------------------------------------------------------------------------------------------------------
@@ -95,7 +238,7 @@ class GfaWriter(_Handle):
     def write(self, item: Union[Edge, SeqRecord]) -> int:
         """Writes an Edge (Link) or SeqRecord (Segment) to the file."""
         if isinstance(item, Edge):
-            return self._handle.write(f"L\t{item.u}\t{item.u_strand}\t{item.v}\t{item.u_strand}\t*\n")
+            return self._handle.write(f"L\t{item.u}\t{item.u_strand}\t{item.v}\t{item.v_strand}\t*\n")
         elif isinstance(item, SeqRecord):
             return self._handle.write(f"S\t{item.id}\t{item.seq}\n")
         raise TypeError(f"Unsupported type: {type(item)}")
@@ -225,6 +368,9 @@ class ReportRow:
         orientation: Strand orientation of the gene relative to the target (same or opposite).
         effect: Biological impact of the insertion on the gene (e.g., TRUNCATED, NONE).
         fractional_depth: The relative read depth of the variant path compared to the source contig, indicating sub-clonal abundance.
+        ref_contig: Reference sequence name after coordinate liftover (requires --reference).
+        ref_start: Locus start in reference coordinates (requires --reference).
+        ref_end: Locus end in reference coordinates (requires --reference).
     """
     locus_id: str
     target: str
@@ -235,6 +381,9 @@ class ReportRow:
     orientation: str
     effect: str
     fractional_depth: float
+    locus_contig: str = "."
+    locus_start: int = -1
+    locus_end: int = -1
 
     @classmethod
     def header(cls, mode: str = 'variant') -> str:
@@ -249,7 +398,11 @@ class ReportRow:
 
     def to_tsv(self) -> str:
         """Formats the row data into a tab-separated string."""
-        return f"{self.locus_id}\t{self.target}\t{self.gene_id}\t{self.context}\t{self.dist_bp}\t{self.topo_hops}\t{self.orientation}\t{self.effect}\t{self.fractional_depth}\n"
+        return (f"{self.locus_id}\t{self.target}\t{self.gene_id}\t{self.context}\t"
+                f"{self.dist_bp}\t{self.topo_hops}\t{self.orientation}\t{self.effect}\t"
+                f"{self.fractional_depth}\t{self.locus_contig}\t{self.locus_start}\t{self.locus_end}\n")
+
+
 
 
 class OutputManager:
@@ -264,21 +417,26 @@ class OutputManager:
         >>>     out.write_locus_relations(locus)
     """
 
-    def __init__(self, prefix: Optional[str], write_gff: bool = True, write_faa: bool = True, write_fna: bool = True, mode: str = 'variant'):
+    def __init__(self, prefix: Optional[str], write_gff: bool = True, write_faa: bool = True,
+                 write_fna: bool = True, mode: str = 'variant',
+                 fasta_lookup: Optional[dict] = None):
         """
         Initialize the OutputManager.
 
         Args:
             prefix: Filename prefix for all output files. If None, TSV is sent to stdout.
             write_gff: Whether to output an assembly-wide GFF3 file.
-            write_faa: Whether to output an assembly-wide protein FASTA file.
+            write_faa: Whether to output a protein FASTA of IS-related genes.
             mode: Pipeline mode ('variant' or 'collapse') to determine TSV headers.
+            fasta_lookup: target_name → [(ref_contig, ref_start, ref_end, ref_seq), ...] built by running LinearPipeline on a reference FASTA (-ar flag). When provided,
+            a separate *_ref_positions.tsv is written with one row per IS copy found in the reference.
         """
         self.prefix = prefix
         self.write_gff = write_gff
         self.write_fna = write_fna
         self.write_faa = write_faa
         self.mode = mode
+        self.fasta_lookup = fasta_lookup or {}
         self._stack = ExitStack()
 
     def __enter__(self):
@@ -310,10 +468,22 @@ class OutputManager:
         if self.prefix:
             self.locus_fasta = self._stack.enter_context(open(f"{self.prefix}_loci.fasta", "w"))
 
+        # 4. Setup reference-positions writer (only when fasta_lookup was provided)
+        self._ref_pos_handle = None
+        if self.prefix and self.fasta_lookup:
+            self._ref_pos_handle = self._stack.enter_context(
+                open(f"{self.prefix}_ref_positions.tsv", "w")
+            )
+            self._ref_pos_handle.write(
+                "target\tref_contig\tref_start\tref_end\tgfa_count\tref_count\tstatus\n"
+            )
+
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self._stack.__exit__(exc_type, exc_val, exc_tb)
+        if exc_type is None and self.prefix and (self.write_fna or self.write_faa):
+            _filter_gene_outputs(self.prefix)
 
     # --- Helper methods ---
 
@@ -327,12 +497,15 @@ class OutputManager:
                 locus_id=locus.id,
                 target=",".join(t.id for t in locus.targets),
                 gene_id="None",
-                context="NONE",   # Flag it as having no local context
+                context="NONE",
                 dist_bp=-1,
                 topo_hops=0,
                 orientation="-",
                 effect="NONE",
                 fractional_depth=locus.fractional_depth,
+                locus_contig=locus.contig,
+                locus_start=locus.start,
+                locus_end=locus.end,
             )
             self.tsv_handle.write(row.to_tsv())
         else:
@@ -352,8 +525,83 @@ class OutputManager:
             orientation=relation.orientation.value,
             effect=relation.effect.name,
             fractional_depth=locus.fractional_depth,
+            locus_contig=locus.contig,
+            locus_start=locus.start,
+            locus_end=locus.end,
         )
         self.tsv_handle.write(row.to_tsv())
+
+    def write_ref_positions(self, gfa_counts: dict[str, int]):
+        """Cross-reference GFA IS counts against every IS in the reference.
+
+        Covers three cases per IS name:
+          - found in both   → one row per reference copy, with gfa_count / ref_count
+          - ref only        → one row per reference copy, gfa_count=0  (not called in GFA)
+          - GFA only        → one row with ref_contig/start/end='.', ref_count=0
+
+        The 'status' column summarises the discrepancy at a glance:
+          consistent   – same count on both sides
+          discrepant   – counts differ (investigate which copies are missing)
+          not_in_gfa   – present in reference but GFA never called it
+          gfa_only     – called by GFA but absent from reference
+        """
+        if not self._ref_pos_handle:
+            return
+
+        all_names = sorted(set(gfa_counts) | set(self.fasta_lookup))
+
+        # Identify synonym groups where pooling resolves a one-sided miss.
+        # Only revise status when at least one member would be not_in_gfa / gfa_only
+        # and the pooled counts are non-zero on both sides.
+        synonym_status: dict[str, str] = {}
+        for _base, group_names in _group_synonyms(all_names).items():
+            indiv = []
+            for n in group_names:
+                g = gfa_counts.get(n, 0)
+                r = len(self.fasta_lookup.get(n, []))
+                if g == 0:
+                    indiv.append("not_in_gfa")
+                elif r == 0:
+                    indiv.append("gfa_only")
+                elif g == r:
+                    indiv.append("consistent")
+                else:
+                    indiv.append("discrepant")
+
+            if "not_in_gfa" in indiv or "gfa_only" in indiv:
+                pooled_gfa = sum(gfa_counts.get(n, 0) for n in group_names)
+                pooled_ref = sum(len(self.fasta_lookup.get(n, [])) for n in group_names)
+                if pooled_gfa > 0 and pooled_ref > 0:
+                    revised = "consistent_synonym" if pooled_gfa == pooled_ref else "discrepant_synonym"
+                    for n in group_names:
+                        synonym_status[n] = revised
+
+        for name in all_names:
+            ref_hits = self.fasta_lookup.get(name, [])
+            gfa_count = gfa_counts.get(name, 0)
+            ref_count = len(ref_hits)
+
+            if name in synonym_status:
+                status = synonym_status[name]
+            elif gfa_count == 0:
+                status = "not_in_gfa"
+            elif ref_count == 0:
+                status = "gfa_only"
+            elif gfa_count == ref_count:
+                status = "consistent"
+            else:
+                status = "discrepant"
+
+            if ref_hits:
+                for ref_ctg, ref_st, ref_en, _seq in ref_hits:
+                    self._ref_pos_handle.write(
+                        f"{name}\t{ref_ctg}\t{ref_st}\t{ref_en}\t{gfa_count}\t{ref_count}\t{status}\n"
+                    )
+            else:
+                # GFA-only: no reference position to report
+                self._ref_pos_handle.write(
+                    f"{name}\t.\t.\t.\t{gfa_count}\t{ref_count}\t{status}\n"
+                )
 
     def write_global_genes(self, contig_id: str, sequence: Union[str, bytes], genes: list['Gene']):
         """Writes assembly-wide gene calls to the GFF3 and FAA files."""

@@ -256,10 +256,11 @@ class IntervalBatch:
             end: Query range end.
 
         Returns:
-            np.ndarray: Indices of overlapping intervals.
+            np.ndarray: Indices of overlapping intervals in this batch.
         """
         if len(self) == 0: return np.empty(0, dtype=np.int32)
-        return _query_kernel(self.starts, self.ends, start, end, self.max_len())
+        batch = self.sort()
+        return _query_kernel(batch.starts, batch.ends, start, end, batch.max_len())
 
     def merge(self, tolerance: int = 0) -> IntervalBatch:
         """
@@ -270,7 +271,8 @@ class IntervalBatch:
         """
         if len(self) == 0:
             return self
-        out = _merge_kernel(self.starts, self.ends, self.strands, tolerance)
+        batch = self.sort()
+        out = _merge_kernel(batch.starts, batch.ends, batch.strands, tolerance)
         return type(self)(out[0], out[1], out[2])
 
     def project(self, shift: int, flip_length: Optional[int] = None) -> IntervalBatch:

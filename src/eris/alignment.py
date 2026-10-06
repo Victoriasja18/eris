@@ -172,7 +172,8 @@ class AlignmentBatch:
         return self.matches - self.mismatches
 
     @classmethod
-    def from_mappy(cls, q_name: str, q_length: int, alignments: Iterable[Alignment]) -> Self:
+    def from_mappy(cls, q_name: str, q_length: int, alignments: Iterable[Alignment],
+                   min_identity: float = 0.75) -> Self:
         """
         Create an AlignmentBatch from mappy Alignment objects.
 
@@ -180,15 +181,17 @@ class AlignmentBatch:
             q_name: Name of the query sequence.
             q_length: Length of the query sequence.
             alignments: Iterable of mappy.Alignment objects.
+            min_identity: Minimum sequence identity (mlen/blen) to keep an alignment.
 
         Returns:
             AlignmentBatch: A new batch containing the alignments.
         """
         # OPTIMIZATION: List comprehension + zip is significantly faster than 14 .append() calls per hit
+        # Use identity filter instead of is_primary so adjacent IS elements are not silently dropped when minimap2 marks them as secondary alignments.
         data = [
             (q_name, q_length, h.q_st, h.q_en, h.ctg, h.ctg_len, h.r_st, h.r_en,
              h.strand, h.blen, h.mlen, h.NM, h.mapq, h.cigar_str)
-            for h in alignments if h.is_primary
+            for h in alignments if h.mlen / max(1, h.blen) >= min_identity
         ]
 
         if not data:
@@ -279,14 +282,51 @@ class AlignmentBatch:
             overlap_found = False
             for ks, ke in kept:
                 overlap = min(e, ke) - max(s, ks)
-                if overlap > 0 and (overlap / length) > max_overlap_fraction:
-                    overlap_found = True
-                    break
+                if overlap > 0:
+                    shorter = min(length, ke - ks)
+                    if (overlap / shorter) > max_overlap_fraction:
+                        overlap_found = True
+                        break
             if overlap_found: continue
 
             kept.append((s, e))
             kept_mask[idx] = True
         return self.filter(kept_mask)
+
+    def extend_is_bounds(self, edge_tolerance: int = 15) -> 'AlignmentBatch':
+        """
+        Extend target (contig) coordinates by the unaligned flanks of the IS reference.
+
+        After swap_sides(), q_start/q_end are IS reference positions. The IS reference may extend beyond the aligned region (q_start bp at the 5' end, q_length-q_end bp at the 3' end). Extending the contig locus by those amounts prevents genes at the IS terminus from being classified as OVERLAPPING_END when they are actually INSIDE the IS element.
+
+        A side is only extended when the alignment is anchored (within `edge_tolerance` bp)
+        at the OPPOSITE reference terminus. Without this guard, a hit to the interior of a
+        long/repetitive reference (anchored at neither end, e.g. one of several independent
+        partial matches to a multi-domain IS) gets padded out to near the full reference
+        length on both sides, which can spuriously bridge real gaps between unrelated hits.
+        """
+        clip_5p = self.q_starts
+        clip_3p = self.q_lengths - self.q_ends
+        anchored_5p = clip_5p <= edge_tolerance
+        anchored_3p = clip_3p <= edge_tolerance
+        eff_clip_5p = np.where(anchored_3p, clip_5p, 0)
+        eff_clip_3p = np.where(anchored_5p, clip_3p, 0)
+        fwd = self.strands == 1
+        new_ts = self.t_starts.copy()
+        new_te = self.t_ends.copy()
+        new_ts[fwd]  = np.maximum(0, new_ts[fwd]  - eff_clip_5p[fwd])
+        new_te[fwd]  = np.minimum(self.t_lengths[fwd],  new_te[fwd]  + eff_clip_3p[fwd])
+        new_ts[~fwd] = np.maximum(0, new_ts[~fwd] - eff_clip_3p[~fwd])
+        new_te[~fwd] = np.minimum(self.t_lengths[~fwd], new_te[~fwd] + eff_clip_5p[~fwd])
+        return AlignmentBatch(
+            q_names=self.q_names, q_lengths=self.q_lengths,
+            q_starts=self.q_starts, q_ends=self.q_ends,
+            t_names=self.t_names, t_lengths=self.t_lengths,
+            t_starts=new_ts, t_ends=new_te,
+            strands=self.strands, lengths=self.lengths,
+            matches=self.matches, mismatches=self.mismatches,
+            qualities=self.qualities, cigars=self.cigars
+        )
 
     def swap_sides(self) -> 'AlignmentBatch':
         """

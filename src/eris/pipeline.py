@@ -194,15 +194,15 @@ class LocusBuilder:
         to produce a sequence of Locus objects.
         """
 
-        # Now expects a list of paths (lists of AlignmentRecords) instead of pairs
-        cleaned_alignments, resolved_paths = self.topology_engine.resolve_split_alignments(alignments)
-
-        # Filter and yield STITCHED paths
-        for path in resolved_paths:
-            # Calculate total coverage of the stitched path against the IS query
-            coverage = (path[-1].q_end - path[0].q_start) / path[0].q_length
-            if coverage >= min_coverage:
-                yield self._stitch(path)
+        # Attempt split alignment resolution if topology engine is present
+        if self.topology_engine:
+            cleaned_alignments, resolved_paths = self.topology_engine.resolve_split_alignments(alignments)
+            for path in resolved_paths:
+                coverage = (path[-1].q_end - path[0].q_start) / path[0].q_length
+                if coverage >= min_coverage:
+                    yield self._stitch(path)
+        else:
+            cleaned_alignments = alignments
 
         # Filter and yield LOCAL (unstitched) alignments
         for contig_id, batch in cleaned_alignments.items():
@@ -210,7 +210,7 @@ class LocusBuilder:
             intact_batch = batch.filter(cov_mask)
 
             if len(intact_batch) > 0:
-                contig_gene_intervals = self.topology_engine.features.get(contig_id, IntervalBatch.empty())
+                contig_gene_intervals = self.topology_engine.features.get(contig_id, IntervalBatch.empty()) if self.topology_engine else self.features.get(contig_id, IntervalBatch.empty())
                 for locus in self._build_local(contig_id, intact_batch, contig_gene_intervals):
                     yield locus
 
@@ -283,7 +283,7 @@ class LocusBuilder:
                     rem_hops -= 1
 
         # 2. Graph Spillover
-        if rem_hops > 0:
+        if rem_hops > 0 and self.topology_engine is not None:
             for s_ctg, node_depth, batch in self.topology_engine.traverse(contig, exit_strand, rem_hops):
                 for i in range(len(batch)):
                     if walk_direction == -1:
@@ -296,63 +296,73 @@ class LocusBuilder:
 
     def _build_local(self, contig: str, alignment_batch: 'AlignmentBatch', gene_intervals: 'IntervalBatch') -> list[
         'Locus']:
-        """Identifies loci within a single contig."""
+        """
+        Identifies loci within a single contig.
+
+        Merging is scoped per IS target (q_name): this keeps genuinely distinct,
+        back-to-back IS elements (e.g. a tandem IS600/ISEc52 pair) as separate loci
+        while still fusing fragmented alignments of the SAME IS (e.g. split across
+        an assembly gap). Cross-target overlap (competing calls for one physical
+        region) is already resolved upstream by cull_overlaps().
+        """
         loci = []
-        aln_intervals = alignment_batch.to_intervals().sort()
-        macro_intervals = aln_intervals.merge(tolerance=self.locus_tolerance)
+        for q_name, q_batch in alignment_batch.split(by_query=True):
+            aln_intervals = q_batch.to_intervals().sort()
+            macro_intervals = aln_intervals.merge(tolerance=self.locus_tolerance)
 
-        for i in range(len(macro_intervals)):
-            macro = macro_intervals[i]
-            target_indices = aln_intervals.query(macro.start, macro.end)
+            for i in range(len(macro_intervals)):
+                macro = macro_intervals[i]
+                target_indices = aln_intervals.query(macro.start, macro.end)
 
-            # Map the sorted spatial indices back to the original alignment batch
-            orig_indices = aln_intervals.original_indices[target_indices]
+                # Map the sorted spatial indices back to the per-target alignment batch
+                orig_indices = aln_intervals.original_indices[target_indices]
 
-            if not (targets := [alignment_batch.get_record(idx) for idx in orig_indices]):
-                continue
+                if not (targets := [q_batch.get_record(idx) for idx in orig_indices]):
+                    continue
 
-            target_features = [
-                GenomicFeature(t.q_name, self.target_feature_type,
-                               [LocationSegment(contig, t.t_start, t.t_end, Strand(t.strand))])
-                for t in targets
-            ]
+                target_features = [
+                    GenomicFeature(t.q_name, self.target_feature_type,
+                                   [LocationSegment(contig, t.t_start, t.t_end, Strand(t.strand))])
+                    for t in targets
+                ]
 
-            # copy number estimation
-            if getattr(self.topology_engine, 'mode', 'variant') == 'collapse':
-                contig_depth = self.genome.contig_depths.get(contig, 1.0)
-                metric_val = float(max(1, round(contig_depth / self.topology_engine.median_depth)))
-            else:
-                metric_val = 1.0
-            locus = Locus(
-                id=f"locus_{uuid4().hex[:8]}", contig=contig, start=macro.start, end=macro.end,
-                targets=target_features, passengers=[], upstream_flanks=[], downstream_flanks=[],
-                fractional_depth=metric_val
-            )
+                # copy number estimation
+                if self.topology_engine is not None and getattr(self.topology_engine, 'mode', 'variant') == 'collapse':
+                    contig_depth = self.genome.contig_depths.get(contig, 1.0)
+                    metric_val = float(max(1, round(contig_depth / self.topology_engine.median_depth)))
+                else:
+                    metric_val = 1.0
+                locus = Locus(
+                    id=f"locus_{uuid4().hex[:8]}", contig=contig, start=macro.start, end=macro.end,
+                    targets=target_features, passengers=[], upstream_flanks=[], downstream_flanks=[],
+                    fractional_depth=metric_val
+                )
 
-            # Determine macro target context bounds
-            primary_strand = Strand(targets[0].strand)
-            macro_bounds = (macro.start, macro.end)
+                # Determine macro target context bounds
+                primary_strand = Strand(targets[0].strand)
+                macro_bounds = (macro.start, macro.end)
 
-            internal_indices = gene_intervals.query(macro.start, macro.end)
-            for idx in internal_indices:
-                locus.passengers.append(
-                    self._resolve_relation(contig, idx, gene_intervals, Context.INSIDE, 0, 0, primary_strand,
-                                           macro_bounds))
+                internal_indices = gene_intervals.query(macro.start, macro.end)
+                for idx in internal_indices:
+                    locus.passengers.append(
+                        self._resolve_relation(contig, idx, gene_intervals, Context.INSIDE, 0, 0, primary_strand,
+                                               macro_bounds))
 
-            if primary_strand == Strand.REVERSE:
-                u_dir, u_bound = 1, macro.end
-                d_dir, d_bound = -1, macro.start
-            else:
-                u_dir, u_bound = -1, macro.start
-                d_dir, d_bound = 1, macro.end
+                if primary_strand == Strand.REVERSE:
+                    u_dir, u_bound = 1, macro.end
+                    d_dir, d_bound = -1, macro.start
+                else:
+                    u_dir, u_bound = -1, macro.start
+                    d_dir, d_bound = 1, macro.end
 
-            self._extract_flanks(contig, u_bound, u_dir, Context.UPSTREAM, gene_intervals, locus.upstream_flanks,
-                                 primary_strand, macro_bounds)
-            self._extract_flanks(contig, d_bound, d_dir, Context.DOWNSTREAM, gene_intervals, locus.downstream_flanks,
-                                 primary_strand, macro_bounds)
+                self._extract_flanks(contig, u_bound, u_dir, Context.UPSTREAM, gene_intervals, locus.upstream_flanks,
+                                     primary_strand, macro_bounds)
+                self._extract_flanks(contig, d_bound, d_dir, Context.DOWNSTREAM, gene_intervals, locus.downstream_flanks,
+                                     primary_strand, macro_bounds)
 
-            loci.append(locus)
+                loci.append(locus)
 
+        loci.sort(key=lambda l: l.start)
         return loci
 
     def _stitch(self, fragments: list['AlignmentRecord']) -> 'Locus':
@@ -429,11 +439,12 @@ class Pipeline:
     gene calling, graph building, and locus assembly. Uses a thread pool
     for parallel contig processing.
     """
-    __slots__ = ('target_db', '_gene_finder', 'max_feature_hops', 'locus_tolerance', '_executor', 'mode', 'min_coverage')
+    __slots__ = ('target_db', '_gene_finder', 'max_feature_hops', 'locus_tolerance', '_executor', 'mode', 'min_coverage', 'min_identity')
     _THREAD_LOCAL = thread_local()
 
     def __init__(self, target_db: 'TargetDatabase', max_feature_hops: int = 3, locus_tolerance: int = 0,
-                 max_workers: Optional[int] = None, mode: str = 'variant', min_coverage: float = 0.30):
+                 max_workers: Optional[int] = None, mode: str = 'variant', min_coverage: float = 0.30,
+                 min_identity: float = 0.75):
         """
         Initialize the Pipeline.
 
@@ -448,6 +459,7 @@ class Pipeline:
         self.locus_tolerance = locus_tolerance
         self.mode = mode
         self.min_coverage = min_coverage
+        self.min_identity = min_identity
         self._gene_finder = GeneFinder(model=Model.Complete, whole_genome=False)
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
 
@@ -468,8 +480,12 @@ class Pipeline:
         gene_batch, aln_batch, features, genes = None, None, [], []
         contig_id, contig_seq = contig
 
+        # Doing alignment using mappy
         if alns := list(self.target_db.aligner.map(str(contig_seq), buf=self._THREAD_LOCAL.buf)):
-            aln_batch = AlignmentBatch.from_mappy(contig_id, len(contig_seq), alns).swap_sides().cull_overlaps()
+            aln_batch = (AlignmentBatch.from_mappy(contig_id, len(contig_seq), alns, self.min_identity)
+                         .swap_sides()
+                         .cull_overlaps()
+                         .extend_is_bounds())
 
         if genes := self._gene_finder.find_genes(bytes(contig_seq)):
             num_genes = len(genes)
@@ -477,6 +493,7 @@ class Pipeline:
             ends = np.empty(num_genes, dtype=np.int32)
             strands = np.empty(num_genes, dtype=np.int8)
 
+            # Define gene_id
             for i, g in enumerate(genes):
                 starts[i] = g.start
                 ends[i] = g.end
@@ -535,3 +552,37 @@ class Pipeline:
         )
 
         yield from builder.assemble(alignments, min_coverage=self.min_coverage)
+
+class LinearPipeline(Pipeline):
+    """
+    Pipeline for standard non-graph assemblies.
+
+    Bypasses TopologyEngine, split-alignment resolution, and graph traversal.
+    Directly annotates loci and flanking genes per contig in 1D coordinate space.
+    """
+
+    def __call__(self, genome: 'GenomeAssembly', out: Optional[Any] = None) -> Iterable['Locus']:
+        """Runs the linear pipeline directly per contig."""
+        for contig_id, g_batch, a_batch, features, genes in self._executor.map(self._process_contig, genome):
+            if g_batch and out:
+                out.write_global_genes(contig_id, bytes(genome[contig_id]), genes)
+
+            if a_batch:
+                # Direct local 1D locus building per contig (No TopologyEngine)
+                gene_intervals = g_batch or IntervalBatch.empty()
+                builder = LocusBuilder(
+                    topology_engine=None,  # No graph engine needed
+                    genome=genome,
+                    target_feature_type=self.target_db.feature_type,
+                    max_feature_hops=self.max_feature_hops,
+                    locus_tolerance=self.locus_tolerance,
+                    features={contig_id: features},
+                    genes={contig_id: genes}
+                )
+
+                # Directly process local alignments on this contig
+                cov_mask = ((a_batch.q_ends - a_batch.q_starts) / a_batch.q_lengths) >= self.min_coverage
+                intact_batch = a_batch.filter(cov_mask)
+
+                for locus in builder._build_local(contig_id, intact_batch, gene_intervals):
+                    yield locus

@@ -261,6 +261,7 @@ class TopologyEngine:
                     qname_chains.append(best_chain)
                     used_in_this_qname.update(best_chain_used)
 
+
             if 'qname_chains' in locals() and qname_chains:
                 if self.mode == 'collapse':
                     # Pick the single chain that covers the most IS sequence
