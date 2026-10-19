@@ -55,13 +55,13 @@ def main():
                         help='Distance tolerance (bp) for merging clustered target alignments')
     pipeline_args.add_argument('-t', '--max-workers', type=int, default=None, metavar='',
                         help='Maximum number of worker threads for alignment and CDS prediction')
-    pipeline_args.add_argument('-m', '--mode', choices=['varaint', 'collapse'], default='variant',
+    pipeline_args.add_argument('-m', '--mode', choices=['variant', 'collapse'], default='variant',
                         help='Resolution mode: "variant" for all possible structural path, "collapse" for a consensus')
     pipeline_args.add_argument('-c', '--min-coverage', type=float, default=0.30, metavar='',
                         help='Minimum coverage fraction (0.0 to 1.0 required to report a locus target)')
 
     targets = parser.add_argument_group('🎯', 'Target arguments')
-    targets.add_argument('-f', '--feature-type', choices=[e.value for e in FeatureType], metavar='', 
+    targets.add_argument('-f', '--feature-type', choices=[e.value for e in FeatureType], metavar='',
                          default=FeatureType.CDS.value, help='Type of feature to annotate')
     targets.add_argument('--indexing-threads', type=int, default=3, metavar='',
                         help='Number of threads to use for indexing if not already indexed')
