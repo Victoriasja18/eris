@@ -16,6 +16,7 @@ from pyfgs import GeneFinder, Model, Gene, Mutation
 from eris.io import TargetDatabase, GenomeAssembly
 from eris.graph import TopologyEngine
 from eris.alignment import AlignmentBatch, AlignmentRecord
+from eris.synonyms import SynonymResolver
 from eris.interval import IntervalBatch, Context, Strand, Interval
 from eris.constants import FeatureType, Orientation, Effect
 
@@ -129,6 +130,7 @@ class Locus:
     upstream_flanks: list['FeatureRelation']
     downstream_flanks: list['FeatureRelation']
     fractional_depth: float = 1.0  # Tracks the sub-clonal abundance
+    coverage_pct: float = -1.0  # % of the target reference covered by its alignments
 
     def extract_sequence(self, genome: 'GenomeAssembly') -> str:
         """
@@ -149,6 +151,27 @@ class Locus:
             seq_parts.append(str(genome[ctg]))
 
         return "".join(seq_parts)
+
+# Functions ------------------------------------------------------------------------------------------------------------
+def target_coverage_pct(records: Iterable['AlignmentRecord']) -> float:
+    """
+    Percentage of the target reference covered by the union of its alignments.
+
+    Synthetic stitching records (idx == -1) only bridge unaligned graph nodes, so they are ignored.
+    """
+    spans = sorted((int(r.q_start), int(r.q_end), int(r.q_length)) for r in records if r.idx != -1)
+    if not spans:
+        return -1.0
+    covered, cur_s, cur_e = 0, spans[0][0], spans[0][1]
+    for s, e, _ in spans[1:]:
+        if s > cur_e:
+            covered += cur_e - cur_s
+            cur_s, cur_e = s, e
+        else:
+            cur_e = max(cur_e, e)
+    covered += cur_e - cur_s
+    return round(100 * covered / spans[0][2], 1)
+
 
 # Classes --------------------------------------------------------------------------------------------------------------
 class LocusBuilder:
@@ -335,7 +358,7 @@ class LocusBuilder:
                 locus = Locus(
                     id=f"locus_{uuid4().hex[:8]}", contig=contig, start=macro.start, end=macro.end,
                     targets=target_features, passengers=[], upstream_flanks=[], downstream_flanks=[],
-                    fractional_depth=metric_val
+                    fractional_depth=metric_val, coverage_pct=target_coverage_pct(targets)
                 )
 
                 # Determine macro target context bounds
@@ -394,7 +417,8 @@ class LocusBuilder:
             end=last.t_end,
             targets=[target_feature], passengers=[],
             upstream_flanks=[], downstream_flanks=[],
-            fractional_depth=metric_val  # Holds either frac_depth or copy_number; NEW: Assign it to the Locus
+            fractional_depth=metric_val,  # Holds either frac_depth or copy_number; NEW: Assign it to the Locus
+            coverage_pct=target_coverage_pct(fragments)
         )
 
         # 2. UPSTREAM FLANKS (Strictly from the first fragment)
@@ -439,12 +463,12 @@ class Pipeline:
     gene calling, graph building, and locus assembly. Uses a thread pool
     for parallel contig processing.
     """
-    __slots__ = ('target_db', '_gene_finder', 'max_feature_hops', 'locus_tolerance', '_executor', 'mode', 'min_coverage', 'min_identity')
+    __slots__ = ('target_db', '_gene_finder', 'max_feature_hops', 'locus_tolerance', '_executor', 'mode', 'min_coverage', 'min_identity', 'synonyms')
     _THREAD_LOCAL = thread_local()
 
     def __init__(self, target_db: 'TargetDatabase', max_feature_hops: int = 3, locus_tolerance: int = 0,
                  max_workers: Optional[int] = None, mode: str = 'variant', min_coverage: float = 0.30,
-                 min_identity: float = 0.75):
+                 min_identity: float = 0.80, synonyms: Optional[SynonymResolver] = None):
         """
         Initialize the Pipeline.
 
@@ -453,6 +477,7 @@ class Pipeline:
             max_feature_hops: Contextual search depth.
             locus_tolerance: Merging tolerance for adjacent hits.
             max_workers: Number of threads for parallel processing.
+            synonyms: If given, synonymous IS targets are renamed to the first-seen name of their group before locus building, so e.g. IS1A and IS1B hits of one insertion can be stitched together.
         """
         self.target_db = target_db
         self.max_feature_hops = max_feature_hops
@@ -460,6 +485,7 @@ class Pipeline:
         self.mode = mode
         self.min_coverage = min_coverage
         self.min_identity = min_identity
+        self.synonyms = synonyms
         self._gene_finder = GeneFinder(model=Model.Complete, whole_genome=False)
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
 
@@ -521,7 +547,7 @@ class Pipeline:
                 if out:
                     out.write_global_genes(contig_id, bytes(genome[contig_id]), genes)
             if a_batch:
-                alignments[contig_id] = a_batch
+                alignments[contig_id] = self.synonyms.rename(a_batch) if self.synonyms else a_batch
 
         # for batch in alignments.values():
         #     for n, _ in enumerate(batch.q_names):
@@ -568,6 +594,8 @@ class LinearPipeline(Pipeline):
                 out.write_global_genes(contig_id, bytes(genome[contig_id]), genes)
 
             if a_batch:
+                if self.synonyms:
+                    a_batch = self.synonyms.rename(a_batch)
                 # Direct local 1D locus building per contig (No TopologyEngine)
                 gene_intervals = g_batch or IntervalBatch.empty()
                 builder = LocusBuilder(

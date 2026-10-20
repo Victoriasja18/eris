@@ -371,6 +371,8 @@ class ReportRow:
         ref_contig: Reference sequence name after coordinate liftover (requires --reference).
         ref_start: Locus start in reference coordinates (requires --reference).
         ref_end: Locus end in reference coordinates (requires --reference).
+        coverage_pct: % of the target (IS) reference covered by its alignments in this locus; a partial
+            match (e.g. a truncated IS) has a low value.
     """
     locus_id: str
     target: str
@@ -384,6 +386,7 @@ class ReportRow:
     locus_contig: str = "."
     locus_start: int = -1
     locus_end: int = -1
+    coverage_pct: float = -1.0
 
     @classmethod
     def header(cls, mode: str = 'variant') -> str:
@@ -400,7 +403,8 @@ class ReportRow:
         """Formats the row data into a tab-separated string."""
         return (f"{self.locus_id}\t{self.target}\t{self.gene_id}\t{self.context}\t"
                 f"{self.dist_bp}\t{self.topo_hops}\t{self.orientation}\t{self.effect}\t"
-                f"{self.fractional_depth}\t{self.locus_contig}\t{self.locus_start}\t{self.locus_end}\n")
+                f"{self.fractional_depth}\t{self.locus_contig}\t{self.locus_start}\t{self.locus_end}\t"
+                f"{self.coverage_pct}\n")
 
 
 
@@ -506,6 +510,7 @@ class OutputManager:
                 locus_contig=locus.contig,
                 locus_start=locus.start,
                 locus_end=locus.end,
+                coverage_pct=locus.coverage_pct,
             )
             self.tsv_handle.write(row.to_tsv())
         else:
@@ -528,6 +533,7 @@ class OutputManager:
             locus_contig=locus.contig,
             locus_start=locus.start,
             locus_end=locus.end,
+            coverage_pct=locus.coverage_pct,
         )
         self.tsv_handle.write(row.to_tsv())
 
