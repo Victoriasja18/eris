@@ -164,3 +164,62 @@ def test_resolve_consumes_alignments_on_intermediate_contigs():
     assert [f.t_name for f in paths[0]] == ["ctgA", "ctgB", "ctgC"]
     assert paths[0][1].idx == -1
     assert "ctgB" not in cleaned
+
+
+def _fragment(q_name, q_length, q_start, q_end, t_name, t_length, t_start, t_end, strand=Strand.FORWARD):
+    length = q_end - q_start
+    return AlignmentBatch(
+        q_names=np.array([q_name]), q_lengths=np.array([q_length], dtype=np.int32),
+        q_starts=np.array([q_start], dtype=np.int32), q_ends=np.array([q_end], dtype=np.int32),
+        t_names=np.array([t_name]), t_lengths=np.array([t_length], dtype=np.int32),
+        t_starts=np.array([t_start], dtype=np.int32), t_ends=np.array([t_end], dtype=np.int32),
+        strands=np.array([strand], dtype=np.int8),
+        lengths=np.array([length], dtype=np.int32), matches=np.array([length], dtype=np.int32),
+        mismatches=np.array([0], dtype=np.int32), qualities=np.array([60], dtype=np.int32),
+        cigars=np.array([f"{length}M"], dtype=object)
+    )
+
+
+@pytest.mark.parametrize("mode", ["variant", "collapse"])
+def test_resolve_chains_fragments_overlapping_by_edge_overlap(mode):
+    # Contigs joined by 111 bp overlaps share 111 bp of the IS, so neighbouring fragments overlap on the query.
+    # All three real fragments must be chained, not skipped over as synthetic nodes.
+    edges = [
+        Edge("ctgA", Strand.FORWARD, "ctgB", Strand.FORWARD, overlap=111),
+        Edge("ctgB", Strand.FORWARD, "ctgC", Strand.FORWARD, overlap=111),
+    ]
+    contig_lengths = {"ctgA": 1000, "ctgB": 500, "ctgC": 5000}
+    contig_depths = {"ctgA": 10.0, "ctgB": 10.0, "ctgC": 10.0}
+    engine = TopologyEngine(edges, contig_lengths, contig_depths, mode=mode)
+
+    alignments = {
+        "ctgA": _fragment("IS1", 1500, 0, 1000, "ctgA", 1000, 0, 1000),
+        "ctgB": _fragment("IS1", 1500, 889, 1389, "ctgB", 500, 0, 500),
+        "ctgC": _fragment("IS1", 1500, 1278, 1500, "ctgC", 5000, 0, 222),
+    }
+
+    cleaned, paths = engine.resolve_split_alignments(alignments)
+
+    assert len(paths) == 1
+    assert [(f.t_name, f.idx != -1) for f in paths[0]] == [("ctgA", True), ("ctgB", True), ("ctgC", True)]
+    assert cleaned == {}
+
+
+@pytest.mark.parametrize("mode", ["variant", "collapse"])
+def test_resolve_follows_gfa_link_in_reverse_complement(mode):
+    # ISEc23 on contigs_shovill_simulated.gfa: the IS starts on the reverse strand of ctgA and continues forward
+    # on ctgB. The GFA only writes the link as 'ctgB - ctgA +'; its complement 'ctgA - ctgB +' is the same link.
+    edges = [Edge("ctgB", Strand.REVERSE, "ctgA", Strand.FORWARD, overlap=111)]
+    contig_lengths = {"ctgA": 1326, "ctgB": 5000}
+    contig_depths = {"ctgA": 30.0, "ctgB": 30.0}
+    engine = TopologyEngine(edges, contig_lengths, contig_depths, mode=mode)
+
+    alignments = {
+        "ctgA": _fragment("IS1", 2532, 0, 1326, "ctgA", 1326, 0, 1326, Strand.REVERSE),
+        "ctgB": _fragment("IS1", 2532, 1215, 2532, "ctgB", 5000, 0, 1317),
+    }
+
+    cleaned, paths = engine.resolve_split_alignments(alignments)
+
+    assert [f.t_name for f in paths[0]] == ["ctgA", "ctgB"]
+    assert cleaned == {}

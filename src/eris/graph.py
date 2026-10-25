@@ -29,6 +29,10 @@ class Edge(NamedTuple):
         """Returns a new Edge object representing the reverse traversal (v -> u)."""
         return Edge(self.v, self.v_strand, self.u, self.u_strand, self.overlap)
 
+    def complement(self) -> 'Edge':
+        """Returns the same link read on the opposite strands, e.g. 'A+ -> B-' becomes 'B+ -> A-'."""
+        return Edge(self.v, Strand(-self.v_strand), self.u, Strand(-self.u_strand), self.overlap)
+
 
 class Graph:
     """
@@ -123,7 +127,8 @@ class TopologyEngine:
     It provides tools for "stitching" together partial alignments that span
     multiple contigs by finding valid physical paths through the graph.
     """
-    __slots__ = ('_graph', 'contig_lengths', 'contig_depths', 'features', '_visited_nodes', 'mode', 'median_depth')
+    __slots__ = ('_graph', 'contig_lengths', 'contig_depths', 'features', '_visited_nodes', 'mode', 'median_depth',
+                 '_max_overlap')
 
     def __init__(self, edges: Iterable[Edge], contig_lengths: dict[str, int], contig_depths: dict[str, float],
                  features: dict[str, IntervalBatch] = None, mode: str = 'variant', median_depth: float = 1.0):
@@ -136,7 +141,10 @@ class TopologyEngine:
             contig_depths: Dictionary mapping contig ID to read depth.
             features: Dictionary mapping contig ID to its annotated intervals.
         """
-        self._graph = Graph(edges)  # Build the graph from parsed edges
+        # A GFA link is written once but holds on both strands, so add its complement for walking the other way
+        edges = list(edges)
+        self._graph = Graph(edges + [e.complement() for e in edges])
+        self._max_overlap: int = max((e.overlap for e in edges), default=0)
         self.contig_lengths: dict[str, int] = contig_lengths
         self.contig_depths: dict[str, float] = contig_depths
         self.features: dict[str, IntervalBatch] = features or {}
@@ -188,7 +196,7 @@ class TopologyEngine:
                 stack = [(i, [start_frag], {i})]
 
                 best_chain = []
-                best_chain_len = 0
+                best_chain_len = (0, 0)
                 best_chain_used = set()
 
                 while stack:
@@ -203,8 +211,9 @@ class TopologyEngine:
                         next_frag = fragments[j]
                         expected_gap = next_frag.q_start - curr_frag.q_end
 
-                        # Fragments must be sequentially downstream on the query
-                        if expected_gap < -50:
+                        # Fragments must be sequentially downstream on the query; adjacent contigs share
+                        # their edge overlap, so their fragments may overlap on the query by that much
+                        if expected_gap < -(self._max_overlap + 50):
                             continue
 
                         # Ask the graph if these two fragments physically connect
@@ -247,7 +256,9 @@ class TopologyEngine:
 
                     # If we can't extend this branch further, evaluate its total coverage
                     if not extended:
-                        chain_cov = curr_path[-1].q_end - curr_path[0].q_start
+                        # On equal coverage, prefer the chain through more real fragments over one that
+                        # jumps past them and turns them into synthetic nodes
+                        chain_cov = (curr_path[-1].q_end - curr_path[0].q_start, len(curr_used))
                         if chain_cov > best_chain_len:
                             best_chain = curr_path
                             best_chain_len = chain_cov
