@@ -196,7 +196,7 @@ class TopologyEngine:
                 stack = [(i, [start_frag], {i})]
 
                 best_chain = []
-                best_chain_len = (0, 0)
+                best_chain_score = (0, 0)
                 best_chain_used = set()
 
                 while stack:
@@ -216,7 +216,7 @@ class TopologyEngine:
                         if expected_gap < -(self._max_overlap + 50):
                             continue
 
-                        # Stitching joins contigs; two hits on one contig at the right spacing are the inverted
+                        # Stitching joins contigs; two fragments on one contig at the right spacing are the inverted
                         # repeats of a cross-mapping relative, and the graph search would call them adjacent
                         if next_frag.t_name == curr_frag.t_name:
                             continue
@@ -263,10 +263,10 @@ class TopologyEngine:
                     if not extended:
                         # On equal coverage, prefer the chain through more real fragments over one that
                         # jumps past them and turns them into synthetic nodes
-                        chain_cov = (curr_path[-1].q_end - curr_path[0].q_start, len(curr_used))
-                        if chain_cov > best_chain_len:
+                        chain_score = (curr_path[-1].q_end - curr_path[0].q_start, len(curr_used))
+                        if chain_score > best_chain_score:
                             best_chain = curr_path
-                            best_chain_len = chain_cov
+                            best_chain_score = chain_score
                             best_chain_used = curr_used
 
                 # If the DFS successfully chained multiple fragments together

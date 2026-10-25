@@ -33,7 +33,7 @@ def compute_metrics(truth_file: Path, eris_loci: list, families: dict[str, str] 
         gt_c = gt_counts.get(is_name, 0)
         er_c = eris_counts.get(is_name, 0)
 
-        # Abundance-aware metric logic
+        # Copy-number-aware metric logic
         c_tp = min(gt_c, er_c)
         c_fp = max(0, er_c - gt_c)
         c_fn = max(0, gt_c - er_c)
@@ -107,7 +107,7 @@ def count_copies(truth_file: Path, eris_loci: list, families: dict[str, str] | N
 def find_overlapping_claims(eris_loci: list, families: dict[str, str]) -> list[tuple[str, str, str]]:
     """
     Returns (locus_a, locus_b, contig) for every two loci of the same IS family whose targets claim overlapping
-    sequence on a contig. Each piece of the genome holds at most one copy of an IS, so one should never be reported twice.
+    sequence on a contig. Each region of the genome holds at most one copy of an IS, so one should never be reported twice.
     """
     claims = {}  # (family, contig) -> [(start, end, locus_id)]
     for locus in eris_loci:
@@ -227,10 +227,10 @@ def test_find_overlapping_claims_flags_leftover_half_of_stitched_locus():
         return SimpleNamespace(id=id_, targets=[SimpleNamespace(
             id="ISEc23_IS66_unknown", segments=[SimpleNamespace(contig=c, start=a, end=b) for c, a, b in segments])])
 
-    stitched = locus("locus_split", ("ctgA", 0, 1326), ("ctgB", 0, 1135))
+    stitched = locus("locus_stitched", ("ctgA", 0, 1326), ("ctgB", 0, 1135))
     leftover = locus("locus_local", ("ctgA", 0, 1326))
     elsewhere = locus("locus_other", ("ctgA", 2000, 3000))
     families = {"ISEc23": "IS66"}
 
-    assert find_overlapping_claims([stitched, leftover, elsewhere], families) == [("locus_local", "locus_split", "ctgA")]
+    assert find_overlapping_claims([stitched, leftover, elsewhere], families) == [("locus_local", "locus_stitched", "ctgA")]
     assert find_overlapping_claims([stitched, elsewhere], families) == []

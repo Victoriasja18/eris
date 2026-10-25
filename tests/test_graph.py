@@ -247,7 +247,7 @@ def _fragments(rows, lengths):
 
 @pytest.mark.parametrize("mode", ["variant", "collapse"])
 def test_resolve_chains_the_is_body_not_both_ends_of_one_long_contig(mode):
-    # ISEc8 on contigs_shovill_simulated.gfa: ctgLong (20.7 kb) has short IS hits at both ends, 20 kb apart, while
+    # ISEc8 on contigs_shovill_simulated.gfa: ctgLong (20.7 kb) has short IS alignments at both ends, 20 kb apart, while
     # the IS body is ctgBody. The two ends of ctgLong are 697 bp apart on the query, so they cannot be one copy.
     R, F = Strand.REVERSE, Strand.FORWARD
     edges = [
