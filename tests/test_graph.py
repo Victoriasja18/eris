@@ -223,3 +223,66 @@ def test_resolve_follows_gfa_link_in_reverse_complement(mode):
 
     assert [f.t_name for f in paths[0]] == ["ctgA", "ctgB"]
     assert cleaned == {}
+
+
+def _fragments(rows, lengths):
+    # rows: (q_name, q_length, q_start, q_end, t_name, t_start, t_end, strand); one batch per contig
+    by_contig = {}
+    for row in rows:
+        by_contig.setdefault(row[4], []).append(row)
+    batches = {}
+    for contig, rs in by_contig.items():
+        n = np.array([r[3] - r[2] for r in rs], dtype=np.int32)
+        batches[contig] = AlignmentBatch(
+            q_names=np.array([r[0] for r in rs]), q_lengths=np.array([r[1] for r in rs], dtype=np.int32),
+            q_starts=np.array([r[2] for r in rs], dtype=np.int32), q_ends=np.array([r[3] for r in rs], dtype=np.int32),
+            t_names=np.array([contig] * len(rs)), t_lengths=np.full(len(rs), lengths[contig], dtype=np.int32),
+            t_starts=np.array([r[5] for r in rs], dtype=np.int32), t_ends=np.array([r[6] for r in rs], dtype=np.int32),
+            strands=np.array([r[7] for r in rs], dtype=np.int8), lengths=n, matches=n,
+            mismatches=np.zeros(len(rs), dtype=np.int32), qualities=np.full(len(rs), 60, dtype=np.int32),
+            cigars=np.array([f"{k}M" for k in n], dtype=object)
+        )
+    return batches
+
+
+@pytest.mark.parametrize("mode", ["variant", "collapse"])
+def test_resolve_chains_the_is_body_not_both_ends_of_one_long_contig(mode):
+    # ISEc8 on contigs_shovill_simulated.gfa: ctgLong (20.7 kb) has short IS hits at both ends, 20 kb apart, while
+    # the IS body is ctgBody. The two ends of ctgLong are 697 bp apart on the query, so they cannot be one copy.
+    R, F = Strand.REVERSE, Strand.FORWARD
+    edges = [
+        Edge("ctgUp", R, "ctgBody", R, overlap=111), Edge("ctgUp", R, "ctgLong", R, overlap=111),
+        Edge("ctgBody", R, "ctgDown", F, overlap=111), Edge("ctgLong", R, "ctgDown", F, overlap=111),
+    ]
+    contig_lengths = {"ctgUp": 159, "ctgLong": 20707, "ctgBody": 965, "ctgDown": 364}
+    contig_depths = {"ctgUp": 65.1, "ctgLong": 33.7, "ctgBody": 33.4, "ctgDown": 70.3}
+    engine = TopologyEngine(edges, contig_lengths, contig_depths, mode=mode)
+
+    alignments = _fragments([
+        ("IS1", 2533, 0, 159, "ctgUp", 0, 159, R),
+        ("IS1", 2533, 48, 168, "ctgLong", 20587, 20707, R),
+        ("IS1", 2533, 48, 1013, "ctgBody", 0, 965, R),
+        ("IS1", 2533, 865, 1013, "ctgLong", 0, 148, R),
+        ("IS1", 2533, 902, 1266, "ctgDown", 0, 364, F),
+    ], contig_lengths)
+
+    _, paths = engine.resolve_split_alignments(alignments)
+
+    assert [f.t_name for f in paths[0]] == ["ctgUp", "ctgBody", "ctgDown"]
+
+
+@pytest.mark.parametrize("mode", ["variant", "collapse"])
+def test_resolve_does_not_stitch_fragments_on_one_contig(mode):
+    # EC958 chromosome: IS21's inverted repeats hit both ends of an IS100kyp copy (IS21 family), 2042 bp apart,
+    # about the IS21 query gap. The body between them is IS100kyp, not IS21, so the ends must stay unstitched.
+    contig_lengths = {"chr": 5000000}
+    engine = TopologyEngine([], contig_lengths, {"chr": 1.0}, mode=mode)
+    alignments = _fragments([
+        ("IS21", 2131, 0, 130, "chr", 2252235, 2252365, Strand.FORWARD),
+        ("IS21", 2131, 1963, 2131, "chr", 2254407, 2254575, Strand.FORWARD),
+    ], contig_lengths)
+
+    cleaned, paths = engine.resolve_split_alignments(alignments)
+
+    assert paths == []
+    assert len(cleaned["chr"]) == 2

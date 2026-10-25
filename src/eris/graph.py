@@ -216,6 +216,11 @@ class TopologyEngine:
                         if expected_gap < -(self._max_overlap + 50):
                             continue
 
+                        # Stitching joins contigs; two hits on one contig at the right spacing are the inverted
+                        # repeats of a cross-mapping relative, and the graph search would call them adjacent
+                        if next_frag.t_name == curr_frag.t_name:
+                            continue
+
                         # Ask the graph if these two fragments physically connect
                         if self.mode == 'collapse':
                             paths = self._find_collapsed_path(
@@ -417,7 +422,8 @@ class TopologyEngine:
     def _find_collapsed_path(self, start_ctg: str, start_strand: Strand, target_ctg: str,
                              target_strand: Strand, expected_len: int, tolerance: int) -> list[dict]:
         """
-        Greedy pathfinder for 'collapse' mode. Always traverses the highest depth neighbor option if finds multiple branchs.
+        Greedy pathfinder for 'collapse' mode. Always traverses the highest depth neighbor option if finds multiple branchs,
+        and backtracks to the next deepest when that branch cannot reach the target.
         """
         # Stack payload: (current_contig, exit_strand, path_list, accumulated_len, peak_depth)
         start_dp = float(self.contig_depths.get(start_ctg, 1.0))
@@ -436,33 +442,27 @@ class TopologyEngine:
             if dist > expected_len + tolerance:
                 continue
 
-            # Greedy Graph Traversal: Find the single deepest valid neighbor
-            deepest_neighbor = None
-            highest_depth = -1
+            # Greedy Graph Traversal: push the shallowest first so the deepest valid neighbor is popped next
+            neighbors = [e for e in self._graph.get_neighbors(curr_ctg)
+                         if e.u_strand == curr_strand and e.v not in path]  # Prevent cyclic infinite loops
+            # Sort on the name too, as set order is not stable between runs
+            neighbors.sort(key=lambda e: (self.contig_depths.get(e.v, 1.0), e.v))
 
-            for edge in self._graph.get_neighbors(curr_ctg):
-                if edge.u_strand != curr_strand: continue
-                if edge.v in path: continue # Prevent cyclic infinite loops
-
-                n_dp = self.contig_depths.get(edge.v, 1.0)
-                if n_dp > highest_depth:
-                    highest_depth = n_dp
-                    deepest_neighbor = edge
-
-            if deepest_neighbor:
-                n_ctg = deepest_neighbor.v
+            for edge in neighbors:
+                n_ctg = edge.v
+                n_dp = self.contig_depths.get(n_ctg, 1.0)
                 n_len = self.contig_lengths.get(n_ctg, 0)
-                overlap_len = getattr(deepest_neighbor, 'overlap', 0)
+                overlap_len = getattr(edge, 'overlap', 0)
 
                 # Absolute normalization for target anchor
                 added_dist = (n_len - overlap_len) if n_ctg != target_ctg else -overlap_len
 
                 stack.append((
                     n_ctg,
-                    deepest_neighbor.v_strand,
+                    edge.v_strand,
                     path + [n_ctg],
                     dist + added_dist,
-                    max(max_dp, highest_depth) # Track the peak depth of the collapsed hub
+                    max(max_dp, n_dp) # Track the peak depth of the collapsed hub
                 ))
 
         # If it reaches a dead end before finding the target anchor
