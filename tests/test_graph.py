@@ -126,3 +126,41 @@ def test_topology_engine_resolve():
     
     # Because both hits were stitched into the path, the 'cleaned' pool should be empty
     assert len(cleaned) == 0
+
+def test_resolve_consumes_alignments_on_intermediate_contigs():
+    # IS1 is split between the end of ctgA and the start of ctgC; the path runs through ctgB,
+    # which only has an alignment of a cross-mapping relative (IS1_variant). Once ctgB is part
+    # of the stitched path, its alignment must not also be reported as a local locus.
+    edges = [
+        Edge("ctgA", Strand.FORWARD, "ctgB", Strand.FORWARD, overlap=0),
+        Edge("ctgB", Strand.FORWARD, "ctgC", Strand.FORWARD, overlap=0)
+    ]
+    contig_lengths = {"ctgA": 1000, "ctgB": 500, "ctgC": 1000}
+    contig_depths = {"ctgA": 10.0, "ctgB": 10.0, "ctgC": 10.0}
+
+    engine = TopologyEngine(edges, contig_lengths, contig_depths, mode='collapse')
+
+    def batch(q_name, q_length, q_start, q_end, t_name, t_length, t_start, t_end):
+        length = q_end - q_start
+        return AlignmentBatch(
+            q_names=np.array([q_name]), q_lengths=np.array([q_length], dtype=np.int32),
+            q_starts=np.array([q_start], dtype=np.int32), q_ends=np.array([q_end], dtype=np.int32),
+            t_names=np.array([t_name]), t_lengths=np.array([t_length], dtype=np.int32),
+            t_starts=np.array([t_start], dtype=np.int32), t_ends=np.array([t_end], dtype=np.int32),
+            strands=np.array([Strand.FORWARD], dtype=np.int8),
+            lengths=np.array([length], dtype=np.int32), matches=np.array([length], dtype=np.int32),
+            mismatches=np.array([0], dtype=np.int32), qualities=np.array([60], dtype=np.int32),
+            cigars=np.array([f"{length}M"], dtype=object)
+        )
+
+    alignments = {
+        "ctgA": batch("IS1", 2000, 0, 1000, "ctgA", 1000, 0, 1000),
+        "ctgB": batch("IS1_variant", 600, 50, 550, "ctgB", 500, 0, 500),
+        "ctgC": batch("IS1", 2000, 1500, 2000, "ctgC", 1000, 0, 500),
+    }
+
+    cleaned, paths = engine.resolve_split_alignments(alignments)
+
+    assert [f.t_name for f in paths[0]] == ["ctgA", "ctgB", "ctgC"]
+    assert paths[0][1].idx == -1
+    assert "ctgB" not in cleaned

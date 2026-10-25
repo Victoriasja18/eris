@@ -270,17 +270,13 @@ class TopologyEngine:
                     # Consume ALL fragments from ALL chains to ensure the alternate
                     # bubble flanks don't accidentally get processed as unstitched debris
                     for chain in qname_chains:
-                        for f in chain:
-                            if f.idx != -1:
-                                used_records.add((f.t_name, f.idx))
+                        self._consume_chain(chain, alignments, used_records)
 
                 else:
                     # VARIANT MODE: Keep all resolved structural paths
                     for chain in qname_chains:
                         resolved_paths.append(chain)
-                        for f in chain:
-                            if f.idx != -1:
-                                used_records.add((f.t_name, f.idx))
+                        self._consume_chain(chain, alignments, used_records)
 
                 del qname_chains # Clean up for the next IS target
 
@@ -298,6 +294,17 @@ class TopologyEngine:
                 cleaned_alignments[contig_id] = intact_batch
 
         return cleaned_alignments, resolved_paths
+
+    @staticmethod
+    def _consume_chain(chain: list['AlignmentRecord'], alignments: dict, used_records: set) -> None:
+        """Marks every real alignment that a stitched chain accounts for, so it is not reported again as local."""
+        for f in chain:
+            if f.idx != -1:
+                used_records.add((f.t_name, f.idx))
+            elif (batch := alignments.get(f.t_name)) is not None:
+                # Synthetic nodes claim a whole intermediate contig, so any alignment on it belongs to this path
+                inside = (batch.t_starts >= f.t_start) & (batch.t_ends <= f.t_end)
+                used_records.update((f.t_name, int(i)) for i in np.flatnonzero(inside))
 
     def _build_stitching_payload(self, h_u: 'AlignmentRecord', h_v: 'AlignmentRecord', path_contigs: list[str]) -> list[
         'AlignmentRecord']:
