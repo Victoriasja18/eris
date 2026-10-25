@@ -218,6 +218,7 @@ class ReportRow:
     Attributes:
         locus_id: Unique identifier for the assembled structural variant locus.
         target: The mobile genetic element(s) or query sequences found in this locus.
+        target_identity: Target identity of each target, comma-separated in the same order as `target`.
         gene_id: The identifier of the contextual passenger or flanking gene.
         context: The spatial relationship (e.g., INSIDE, UPSTREAM) of the gene to the target.
         dist_bp: Distance in base pairs between the gene and the target element.
@@ -228,6 +229,7 @@ class ReportRow:
     """
     locus_id: str
     target: str
+    target_identity: str
     gene_id: str
     context: str
     dist_bp: int
@@ -249,7 +251,7 @@ class ReportRow:
 
     def to_tsv(self) -> str:
         """Formats the row data into a tab-separated string."""
-        return f"{self.locus_id}\t{self.target}\t{self.gene_id}\t{self.context}\t{self.dist_bp}\t{self.topo_hops}\t{self.orientation}\t{self.effect}\t{self.fractional_depth}\n"
+        return f"{self.locus_id}\t{self.target}\t{self.target_identity}\t{self.gene_id}\t{self.context}\t{self.dist_bp}\t{self.topo_hops}\t{self.orientation}\t{self.effect}\t{self.fractional_depth}\n"
 
 
 class OutputManager:
@@ -326,6 +328,7 @@ class OutputManager:
             row = ReportRow(
                 locus_id=locus.id,
                 target=",".join(t.id for t in locus.targets),
+                target_identity=format_identities(locus),
                 gene_id="None",
                 context="NONE",   # Flag it as having no local context
                 dist_bp=-1,
@@ -345,6 +348,7 @@ class OutputManager:
         row = ReportRow(
             locus_id=locus.id,
             target=",".join(t.id for t in locus.targets),
+            target_identity=format_identities(locus),
             gene_id=relation.feature.id,
             context=relation.spatial.name,
             dist_bp=relation.distance_bp,
@@ -368,3 +372,9 @@ class OutputManager:
         """Writes a single locus nucleotide sequence to the loci FASTA file."""
         if self.locus_fasta:
             self.locus_fasta.write(f">{locus_id}\n{sequence}\n")
+
+
+# Functions ------------------------------------------------------------------------------------------------------------
+def format_identities(locus: 'Locus') -> str:
+    """Target identities of a locus to 4 decimals, comma-separated in the same order as its targets."""
+    return ",".join(f"{t.identity:.4f}" for t in locus.targets)

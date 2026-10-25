@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 
-from eris.alignment import Cigar, AlignmentBatch
+from eris.alignment import Cigar, AlignmentBatch, AlignmentRecord, pooled_identity
 from eris.constants import Strand
 
 def test_cigar_parsing():
@@ -105,3 +105,18 @@ def test_alignment_batch_to_intervals():
     # Convert using query coordinates
     query_intervals = batch.to_intervals(by_query=True) 
     assert np.array_equal(query_intervals.starts, batch.q_starts)
+
+def test_alignment_identity_is_matches_over_block_length():
+    batch = _mock_alignment_batch()
+    assert np.allclose(batch.identities, [40 / 40, 38 / 40, 48 / 50])
+    assert batch.get_record(1).identity == pytest.approx(0.95)
+
+def test_pooled_identity_leaves_out_synthetic_records():
+    real_a = _mock_alignment_batch().get_record(1)  # 38 / 40
+    real_b = _mock_alignment_batch().get_record(2)  # 48 / 50
+    # A contig bridged without an alignment claims its whole length with no matches
+    synthetic = AlignmentRecord(idx=-1, q_name="read1", q_length=100, q_start=40, q_end=50, t_name="ctgB",
+                                t_length=500, t_start=0, t_end=500, strand=Strand.FORWARD, length=500,
+                                match=0, mismatch=0, quality=0, cigar="*")
+
+    assert pooled_identity([real_a, synthetic, real_b]) == pytest.approx((38 + 48) / (40 + 50))
