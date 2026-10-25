@@ -22,6 +22,18 @@ class Log:
         if flush: self.stream.flush()
 
 
+# Functions ------------------------------------------------------------------------------------------------------------
+def fraction(value: str) -> float:
+    """Argparse type for a fraction from 0.0 to 1.0."""
+    try:
+        f = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a number") from None
+    if not 0.0 <= f <= 1.0:
+        raise argparse.ArgumentTypeError(f"{value} is not between 0.0 and 1.0")
+    return f
+
+
 # Main CLI entry-point -------------------------------------------------------------------------------------------------
 def main():
 
@@ -57,8 +69,11 @@ def main():
                         help='Maximum number of worker threads for alignment and CDS prediction')
     pipeline_args.add_argument('-m', '--mode', choices=['variant', 'collapse'], default='variant',
                         help='Resolution mode: "variant" for all possible structural path, "collapse" for a consensus')
-    pipeline_args.add_argument('-c', '--min-coverage', type=float, default=0.30, metavar='',
-                        help='Minimum coverage fraction (0.0 to 1.0 required to report a locus target)')
+    pipeline_args.add_argument('-c', '--min-coverage', type=fraction, default=0.30, metavar='',
+                        help='Minimum target coverage (0.0 to 1.0) required to report a locus target')
+    pipeline_args.add_argument('--min-identity', type=fraction, default=0.0, metavar='',
+                        help='Minimum target identity (0.0 to 1.0; matching bases over aligned bases, gaps counted) '
+                             'required to report a locus target. Stitched loci are pooled over their fragments')
 
     targets = parser.add_argument_group('🎯', 'Target arguments')
     targets.add_argument('-f', '--feature-type', choices=[e.value for e in FeatureType], metavar='',
@@ -93,7 +108,8 @@ def main():
     from eris.pipeline import Pipeline
 
     # Hook up the OutputManager parameters explicitly
-    with (Pipeline(target_db, args.hops, args.tolerance, args.max_workers, mode=args.mode, min_coverage=args.min_coverage) as pipeline,
+    with (Pipeline(target_db, args.hops, args.tolerance, args.max_workers, mode=args.mode,
+                   min_coverage=args.min_coverage, min_identity=args.min_identity) as pipeline,
           OutputManager(args.outprefix, write_gff=not args.no_gff, write_faa=not args.no_faa, write_fna=not args.no_fna, mode=args.mode) as out):
 
         log.msg("⌛️ Running topological traversal...\n", flush=True)
