@@ -153,6 +153,12 @@ def inside_is(cds: Cds, bed: dict, exclude: str) -> str:
     return ''
 
 
+def cds_fields(tag: str, cds: Cds) -> dict:
+    """The truth columns that describe the CDS of a relation."""
+    return {'locus_tag': tag, 'gene': cds.gene, 'product': cds.product, 'cds_start': cds.start, 'cds_end': cds.end,
+            'cds_strand': cds.strand, 'partial': cds.partial, 'pseudo': cds.pseudo}
+
+
 def build(curated: list[dict], genes: dict[str, Cds], bed: dict) -> tuple[list[dict], list[dict]]:
     truth, review = [], []
     genes_inside = {}
@@ -163,7 +169,9 @@ def build(curated: list[dict], genes: dict[str, Cds], bed: dict) -> tuple[list[d
     for row in curated:
         replicon, start, end = strip_refseq(row['Chr']), int(row['Start']), int(row['End'])
         is_id, is_strand = bed.get((replicon, start, end), (None, None))
-        row_effect, note = row.get('Effect', ''), (row.get('Note') or '').strip()
+        curated_effect = row.get('Effect', '').strip()
+        is_fields = {'is_id': is_id, 'replicon': replicon, 'is_start': start, 'is_end': end, 'is_strand': is_strand,
+                     'curated_effect': curated_effect, 'note': (row.get('Note') or '').strip()}
 
         def flag(reason, **extra):
             review.append({'is_id': is_id or row['IS_name'], 'replicon': replicon, 'is_start': start,
@@ -172,18 +180,14 @@ def build(curated: list[dict], genes: dict[str, Cds], bed: dict) -> tuple[list[d
         if is_id is None:
             flag('IS coordinates not in the truth BED')
             continue
-        if row_effect.strip().lower() not in SCORED_EFFECTS:
-            flag(f'curated effect is "{row_effect.strip()}"')
+        if curated_effect.lower() not in SCORED_EFFECTS:
+            flag(f'curated effect is "{curated_effect}"')
 
         disrupted_found, seen = False, set()
         for tag, cds in genes_inside.get((replicon, start, end), []):
             seen.add((is_id, tag))
-            truth.append({'is_id': is_id, 'replicon': replicon, 'is_start': start, 'is_end': end,
-                          'is_strand': is_strand, 'side': 'inside', 'locus_tag': tag, 'gene': cds.gene,
-                          'product': cds.product, 'cds_start': cds.start, 'cds_end': cds.end,
-                          'cds_strand': cds.strand, 'partial': cds.partial, 'pseudo': cds.pseudo,
-                          'distance_bp': 0, 'effect': 'none', 'curated_effect': row_effect.strip(),
-                          'inside_is': '', 'note': note})
+            truth.append({**is_fields, **cds_fields(tag, cds), 'side': 'inside', 'distance_bp': 0, 'effect': 'none',
+                          'inside_is': ''})
         for curated_side in CURATED_SIDES:
             cell = row.get(curated_side.capitalize(), '')
             for tag, curated_partial, curated_distance in parse_cell(cell):
@@ -212,15 +216,11 @@ def build(curated: list[dict], genes: dict[str, Cds], bed: dict) -> tuple[list[d
                 if (is_id, tag) in seen:
                     continue  # the same CDS curated on both sides; its coordinates decide which
                 seen.add((is_id, tag))
-                effect = relation_effect(row_effect, side, cds, distance)
+                effect = relation_effect(curated_effect, side, cds, distance)
                 disrupted_found |= effect == 'disrupted'
-                truth.append({'is_id': is_id, 'replicon': replicon, 'is_start': start, 'is_end': end,
-                              'is_strand': is_strand, 'side': side, 'locus_tag': tag, 'gene': cds.gene,
-                              'product': cds.product, 'cds_start': cds.start, 'cds_end': cds.end,
-                              'cds_strand': cds.strand, 'partial': cds.partial, 'pseudo': cds.pseudo,
-                              'distance_bp': distance, 'effect': effect, 'curated_effect': row_effect.strip(),
-                              'inside_is': inside_is(cds, bed, exclude=is_id), 'note': note})
-        if row_effect.strip().lower() == 'disrupts' and not disrupted_found:
+                truth.append({**is_fields, **cds_fields(tag, cds), 'side': side, 'distance_bp': distance,
+                              'effect': effect, 'inside_is': inside_is(cds, bed, exclude=is_id)})
+        if curated_effect.lower() == 'disrupts' and not disrupted_found:
             flag('curated as Disrupts, but no flanking CDS is partial, pseudo or overlapping')
     return truth, review
 

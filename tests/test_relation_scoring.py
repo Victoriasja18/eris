@@ -127,8 +127,7 @@ def test_misses_found_with_a_larger_hops_budget_are_told_apart():
                    down=[relation("short", Context.DOWNSTREAM), relation("g2", Context.DOWNSTREAM, 900)])]
     score = score_relations(truths, loci, FAMILIES, placed(g1=(1000, 2000), g2=(5000, 6000)), reach_loci=reach)
 
-    assert score.misses == {("famA", "downstream", "T2"), ("famA", "downstream", "T3")}
-    assert score.budget_misses == {("famA", "downstream", "T2")}
+    assert score.miss_causes == {("famA", "downstream", "T2"): "budget", ("famA", "downstream", "T3"): "gene"}
     assert score.unplaceable == ["short"]
 
 

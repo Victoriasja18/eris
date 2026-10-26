@@ -17,6 +17,7 @@ from Bio import SeqIO
 from Bio.Seq import reverse_complement
 
 from eris.constants import Context, Effect
+from eris.pipeline import FeatureRelation
 
 SIDES = ('upstream', 'downstream')
 # A gene crossing an end of the IS is reported as a passenger, but it is a flank on the side it sticks out of
@@ -25,6 +26,7 @@ MIN_OVERLAP = 0.5  # of the shorter of the eris gene and the RefSeq CDS
 DISRUPTING = Effect.DISRUPTED | Effect.TRUNCATED  # a truncation is a kind of disruption
 MIN_IDENTITY = 0.99  # over the aligned part, for a matched flank's sequence to count as correct
 MIN_CDS_COVERAGE = 0.8  # of the RefSeq CDS; waived when it is partial or pseudo
+RelationKey = tuple[str, str, str]  # (IS family, side, locus tag)
 NEAR = 150  # bp; pyfgs start codons and eris's IS ends differ from RefSeq by a few to tens of bp, so distances are banded
 
 
@@ -43,7 +45,7 @@ class TruthRelation:
     effect: str | None  # 'disrupted' or 'none'; None when the effect is not scored
 
     @property
-    def key(self) -> tuple[str, str, str]:
+    def key(self) -> RelationKey:
         return self.family, self.side, self.locus_tag
 
 
@@ -68,10 +70,9 @@ def read_truth(path: Path, families: dict[str, str], replicons: set[str] | None 
     for r in rows:
         if replicons is not None and r['replicon'] not in replicons:
             continue
-        name = r['is_id'].split('_')[0]
         scored = not r['inside_is'] and r['effect'] in ('disrupted', 'none')
         truths.append(TruthRelation(
-            family=families.get(name, name), side=r['side'], locus_tag=r['locus_tag'], replicon=r['replicon'],
+            family=family_of(r['is_id'], families), side=r['side'], locus_tag=r['locus_tag'], replicon=r['replicon'],
             start=int(r['cds_start']), end=int(r['cds_end']), strand=r['cds_strand'], partial=r['partial'] == 'True',
             pseudo=r['pseudo'] == 'True', distance_bp=int(r['distance_bp']), effect=r['effect'] if scored else None))
     return truths
@@ -113,25 +114,34 @@ class Flank:
     """One flank reported by eris, read from a locus."""
     family: str
     side: str
-    relation: object  # eris FeatureRelation
+    relation: FeatureRelation
 
 
 @dataclass
 class RelationScore:
     total: dict[str, int] = field(default_factory=dict)  # truth relations per side
-    found: set[tuple[str, str, str]] = field(default_factory=set)
-    misses: set[tuple[str, str, str]] = field(default_factory=set)
-    budget_misses: set[tuple[str, str, str]] = field(default_factory=set)  # misses found with a larger hops budget
-    nucleotide_mismatches: set[tuple[str, str, str]] = field(default_factory=set)  # found, but the sequence is off
-    found_any_side: set[tuple[str, str, str]] = field(default_factory=set)  # the gene was found, maybe on the other side
+    found: set[RelationKey] = field(default_factory=set)
+    misses: set[RelationKey] = field(default_factory=set)
+    budget_misses: set[RelationKey] = field(default_factory=set)  # misses found with a larger hops budget
+    nucleotide_mismatches: set[RelationKey] = field(default_factory=set)  # found, but the sequence is off
+    found_any_side: set[RelationKey] = field(default_factory=set)  # the gene was found, maybe on the other side
     first_flanks: int = 0  # eris's first flank per side per branch
     true_first_flanks: int = 0  # ... that match a truth relation
     bands: list[tuple[str, str]] = field(default_factory=list)  # (truth, eris) distance band of each found relation
     distance_errors: list[int] = field(default_factory=list)
-    # Precision counts eris's disrupted first flanks; recall counts the truth's disrupted relations
-    disrupted: dict[str, int] = field(default_factory=lambda: {'called': 0, 'called_true': 0, 'truth': 0, 'truth_found': 0})
+    # Disrupted precision is over eris's first flanks called DISRUPTED or TRUNCATED, like `precision`; a disrupted
+    # call further along a branch is not counted. Recall is over the truth's disrupted relations.
+    disrupted_called: int = 0
+    disrupted_called_true: int = 0
+    disrupted_truth: int = 0
+    disrupted_truth_found: int = 0
     upregulated: list[tuple[str, str, str]] = field(default_factory=list)  # (family, side, eris gene); not scored
     unplaceable: list[str] = field(default_factory=list)  # reported flank genes with no place on the reference
+
+    @property
+    def miss_causes(self) -> dict[RelationKey, str]:
+        """Each miss with its cause: 'budget' if a larger hops budget finds it, else 'gene'."""
+        return {k: 'budget' if k in self.budget_misses else 'gene' for k in self.misses}
 
     @property
     def recall(self) -> dict[str, float]:
@@ -149,13 +159,11 @@ class RelationScore:
 
     @property
     def disrupted_precision(self) -> float:
-        d = self.disrupted
-        return d['called_true'] / d['called'] if d['called'] else 0.0
+        return self.disrupted_called_true / self.disrupted_called if self.disrupted_called else 0.0
 
     @property
     def disrupted_recall(self) -> float:
-        d = self.disrupted
-        return d['truth_found'] / d['truth'] if d['truth'] else 0.0
+        return self.disrupted_truth_found / self.disrupted_truth if self.disrupted_truth else 0.0
 
     @property
     def band_agreement(self) -> float:
@@ -170,9 +178,14 @@ class RelationScore:
         return max(self.distance_errors, default=0)
 
 
-def locus_family(locus, families: dict[str, str]) -> str:
-    name = locus.targets[0].id.split('_')[0]
+def family_of(name: str, families: dict[str, str]) -> str:
+    """The IS family of a target or truth IS name, e.g. 'IS600_IS3_IS3' or 'IS600_2' -> 'IS3'."""
+    name = name.split('_')[0]
     return families.get(name, name)
+
+
+def locus_family(locus, families: dict[str, str]) -> str:
+    return family_of(locus.targets[0].id, families)
 
 
 def read_flanks(locus, families: dict[str, str]) -> list[Flank]:
@@ -213,16 +226,19 @@ def first_flanks(flanks: list[Flank]) -> list[Flank]:
     return firsts
 
 
+def overlap(placement: Placement, truth: TruthRelation) -> int:
+    return min(placement.end, truth.end) - max(placement.start, truth.start)
+
+
 def matches(placement: Placement, truth: TruthRelation) -> bool:
     if placement.replicon != truth.replicon or placement.strand != truth.strand:
         return False
-    overlap = min(placement.end, truth.end) - max(placement.start, truth.start)
-    return overlap >= MIN_OVERLAP * min(placement.end - placement.start, truth.end - truth.start)
+    return overlap(placement, truth) >= MIN_OVERLAP * min(placement.end - placement.start, truth.end - truth.start)
 
 
 def sequence_agrees(placement: Placement, truth: TruthRelation) -> bool:
     """Whether a matched eris gene has the RefSeq CDS's sequence; boundaries of partial or pseudo CDS are not checked."""
-    covered = (min(placement.end, truth.end) - max(placement.start, truth.start)) / (truth.end - truth.start)
+    covered = overlap(placement, truth) / (truth.end - truth.start)
     return placement.identity >= MIN_IDENTITY and (covered >= MIN_CDS_COVERAGE or truth.partial or truth.pseudo)
 
 
@@ -246,22 +262,23 @@ def score_relations(truths: list[TruthRelation], loci: list, families: dict[str,
                          if f.relation.effect & Effect.UPREGULATED]
     for f in (f for locus_flanks in per_locus for f in first_flanks(locus_flanks)):
         placements = place(f.relation.feature.id)
-        true = [t for t in truths if t.family == f.family and t.side == f.side and any(matches(p, t) for p in placements)]
+        matched = [t for t in truths
+                   if t.family == f.family and t.side == f.side and any(matches(p, t) for p in placements)]
         score.first_flanks += 1
-        score.true_first_flanks += bool(true)
+        score.true_first_flanks += bool(matched)
         # A flank whose effect is not scored is left out
-        if f.relation.effect & DISRUPTING and not any(t.effect is None for t in true):
-            score.disrupted['called'] += 1
-            score.disrupted['called_true'] += any(t.effect == 'disrupted' for t in true)
+        if f.relation.effect & DISRUPTING and not any(t.effect is None for t in matched):
+            score.disrupted_called += 1
+            score.disrupted_called_true += any(t.effect == 'disrupted' for t in matched)
     for t in truths:
-        hits = matching_flanks(t, flanks, place)
-        if hits:
+        matching = matching_flanks(t, flanks, place)
+        if matching:
             score.found_any_side.add(t.key)
-        on_side = [f.relation for f in hits if f.side == t.side]
+        on_side = [f.relation for f in matching if f.side == t.side]
         nearest = min(on_side, key=lambda r: (r.topological_dist, r.distance_bp), default=None)
         if t.effect == 'disrupted':
-            score.disrupted['truth'] += 1
-            score.disrupted['truth_found'] += bool(nearest and nearest.effect & DISRUPTING)
+            score.disrupted_truth += 1
+            score.disrupted_truth_found += bool(nearest and nearest.effect & DISRUPTING)
         if nearest is None:
             score.misses.add(t.key)
             continue
@@ -282,17 +299,16 @@ def score_relations(truths: list[TruthRelation], loci: list, families: dict[str,
 def report(score: RelationScore) -> str:
     """A readable summary of a score, for the test log."""
     found = {side: sum(k[1] == side for k in score.found) for side in SIDES}
-    d = score.disrupted
     lines = [
         *(f"recall {side}: {found[side]}/{score.total[side]} = {score.recall[side]:.3f}" for side in SIDES),
         f"recall pooled over sides: {len(score.found_any_side)}/{sum(score.total.values())} = {score.pooled_recall:.3f}",
         f"precision of first flanks: {score.true_first_flanks}/{score.first_flanks} = {score.precision:.3f}",
         f"distance band agreement: {score.band_agreement:.3f} (median error {score.median_distance_error} bp, "
         f"max {score.max_distance_error} bp)",
-        f"disrupted precision: {d['called_true']}/{d['called']} = {score.disrupted_precision:.3f}",
-        f"disrupted recall: {d['truth_found']}/{d['truth']} = {score.disrupted_recall:.3f}",
+        f"disrupted precision: {score.disrupted_called_true}/{score.disrupted_called} = {score.disrupted_precision:.3f}",
+        f"disrupted recall: {score.disrupted_truth_found}/{score.disrupted_truth} = {score.disrupted_recall:.3f}",
         f"misses: {len(score.misses)}, of which {len(score.budget_misses)} within reach of a larger hops budget",
-        *(f"  {'budget' if k in score.budget_misses else 'gene  '} {k}" for k in sorted(score.misses)),
+        *(f"  {cause:6} {k}" for k, cause in sorted(score.miss_causes.items())),
         f"nucleotide mismatches: {sorted(score.nucleotide_mismatches)}",
         f"UPREGULATED calls (not scored): {score.upregulated}",
         f"unplaceable flank genes: {score.unplaceable}",

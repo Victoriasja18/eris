@@ -6,8 +6,8 @@ import pytest
 # The builder is a script, not part of the eris package
 _SCRIPT = Path(__file__).parent.parent / "scripts" / "build_relation_truth.py"
 _spec = importlib.util.spec_from_file_location("build_relation_truth", _SCRIPT)
-brt = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(brt)
+truth_builder = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(truth_builder)
 
 CURATED = (
     '"##Chr=""Chromosome"""\t\t\t\t\t\t\t\t\n'
@@ -38,8 +38,8 @@ def built(tmp_path):
     (tmp_path / "curated.txt").write_text(CURATED)
     (tmp_path / "genes.gff").write_text(GFF)
     (tmp_path / "is.bed").write_text(BED)
-    truth, review = brt.build(brt.read_curated(tmp_path / "curated.txt"), brt.read_gff(tmp_path / "genes.gff"),
-                              brt.read_bed(tmp_path / "is.bed"))
+    truth, review = truth_builder.build(truth_builder.read_curated(tmp_path / "curated.txt"), truth_builder.read_gff(tmp_path / "genes.gff"),
+                              truth_builder.read_bed(tmp_path / "is.bed"))
     return {(r["is_id"], r["side"], r["locus_tag"]): r for r in truth}, review
 
 
