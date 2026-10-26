@@ -4,6 +4,7 @@ import numpy as np
 from eris.graph import Graph, Edge, TopologyEngine
 from eris.constants import Strand
 from eris.alignment import AlignmentBatch
+from eris.interval import IntervalBatch
 
 def test_undirected_graph_edges():
     graph = Graph(directed=False)
@@ -295,3 +296,34 @@ def test_neighbours_come_back_in_the_order_their_links_were_read():
 
     assert list(graph.get_neighbors("hub")) == edges
     assert list(graph.get_neighbors("ctg3")) == [edges[3].reverse()]
+
+
+def _collapsed_repeat(mode):
+    """An IS contig whose two ends each link to three flanking contigs, one per copy, with three genes on each."""
+    lengths = {"is": 1000, **{f"{side}{i}": 3000 for side in "ud" for i in range(3)}}
+    genes = IntervalBatch(np.array([0, 1000, 2000]), np.array([900, 1900, 2900]), np.ones(3, dtype=np.int8))
+    edges = [Edge(f"u{i}", Strand.FORWARD, "is", Strand.FORWARD) for i in range(3)] + \
+            [Edge("is", Strand.FORWARD, f"d{i}", Strand.FORWARD) for i in range(3)]
+    features = {ctg: genes for ctg in lengths if ctg != "is"}
+    return TopologyEngine(edges, lengths, {ctg: 1.0 for ctg in lengths}, features=features, mode=mode)
+
+
+def _flanks(engine, exit_strand, hops):
+    return sorted((ctg, int(i)) for ctg, _, batch in engine.traverse("is", exit_strand, hops)
+                  for i in batch.original_indices)
+
+
+def test_collapse_mode_gives_each_copy_of_a_collapsed_repeat_its_own_flank_budget():
+    engine = _collapsed_repeat('collapse')
+
+    # Downstream reads each copy's first gene; upstream walks the links backwards, so reads each copy's last gene
+    assert _flanks(engine, Strand.FORWARD, 1) == [("d0", 0), ("d1", 0), ("d2", 0)]
+    assert _flanks(engine, Strand.REVERSE, 1) == [("u0", 2), ("u1", 2), ("u2", 2)]
+
+
+def test_variant_mode_shares_the_flank_budget_across_branches():
+    # Variant mode reports each copy as its own locus already; a budget per branch only fans its flanks out
+    engine = _collapsed_repeat('variant')
+
+    assert _flanks(engine, Strand.FORWARD, 1) == [("d0", 0)]
+    assert _flanks(engine, Strand.REVERSE, 1) == [("u0", 2)]

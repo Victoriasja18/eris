@@ -480,7 +480,9 @@ class TopologyEngine:
         Args:
             start_node: Starting contig ID.
             exit_strand: Strand to exit from.
-            hops_needed: Maximum number of features (intervals) to find.
+            hops_needed: Maximum number of features (intervals) to find. In collapse mode this is per branch, so
+                every copy of a collapsed repeat gets flanks; in variant mode it is shared by all branches, as each
+                copy is already its own locus and a budget per branch would only fan its flanks out.
 
         Returns:
             list: (contig_id, hop_index, projected_IntervalBatch)
@@ -488,13 +490,16 @@ class TopologyEngine:
         queue = [(start_node, exit_strand, hops_needed, 1, 0)]
         projected_results = []
         visited_edges = {(start_node, exit_strand)}
+        per_branch = self.mode == 'collapse'
 
         while queue:
-            curr_ctg, curr_exit, rem_hops, node_depth, shift = queue.pop(0)
-            if rem_hops <= 0: continue
+            curr_ctg, curr_exit, parent_hops, node_depth, shift = queue.pop(0)
+            if parent_hops <= 0: continue
+            rem_hops = parent_hops
 
             for edge in self._graph.get_neighbors(curr_ctg):
                 if edge.u_strand != curr_exit: continue
+                if per_branch: rem_hops = parent_hops
 
                 v = edge.v
                 if (v, edge.v_strand) in visited_edges: continue
