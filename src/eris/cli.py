@@ -62,7 +62,8 @@ def main():
 
     pipeline_args = parser.add_argument_group('⚙️', 'Pipeline arguments')
     pipeline_args.add_argument('--hops', type=int, default=3, metavar='',
-                        help='Maximum number of contextual genes to sweep upstream/downstream')
+                        help='Maximum number of contextual genes to sweep upstream/downstream; in collapse mode, '
+                             'along each graph branch, so every copy of a collapsed repeat gets flanks')
     pipeline_args.add_argument('-l', '--tolerance', type=int, default=0, metavar='',
                         help='Distance tolerance (bp) for merging clustered target alignments')
     pipeline_args.add_argument('-t', '--max-workers', type=int, default=None, metavar='',

@@ -5,6 +5,7 @@ from pathlib import Path
 from eris.io import GenomeAssembly, TargetDatabase
 from eris.pipeline import Pipeline
 from eris.constants import FeatureType
+from relation_scoring import GenePlacer, read_truth, report, score_relations
 
 DATA_DIR = Path("data")
 
@@ -234,3 +235,167 @@ def test_find_overlapping_claims_flags_leftover_half_of_stitched_locus():
 
     assert find_overlapping_claims([stitched, leftover, elsewhere], families) == [("locus_local", "locus_stitched", "ctgA")]
     assert find_overlapping_claims([stitched, elsewhere], families) == []
+
+
+# Relation benchmark -------------------------------------------------------------------------------------------------
+# Scores how eris relates each IS to its flanks against the curated EC958 truth, built by
+# scripts/build_relation_truth.py. See docs/adr/0002-relation-benchmark-truth.md and tests/relation_scoring.py.
+RELATION_TRUTH = DATA_DIR / "ec958_IS_cds_relations.tsv"
+REFERENCE = DATA_DIR / "EC958_complete_genome.fasta"
+needs_relation_data = pytest.mark.skipif(
+    not all(f.exists() for f in (DATA_DIR / "IS.mmi", RELATION_TRUTH, REFERENCE, DATA_DIR / "contigs_shovill_simulated.gfa")),
+    reason=f"relation benchmark data not found in {DATA_DIR}/",
+)
+RELATION_BENCHMARKS = {
+    # assembly, the replicons its truth relations lie on
+    "complete": ("EC958_complete_genome.fasta", None),
+    "fragmented": ("contigs_shovill_simulated.gfa", {"HG941718.1"}),  # simulated from the chromosome only
+}
+RELATION_HOPS = 3  # eris's default
+REACH_HOPS = 20  # a miss found with this budget is put down to the budget, not to a wrong gene
+
+# Truth relations eris misses, as {(family, side, locus tag): cause}. The cause is "budget" when a run with
+# REACH_HOPS finds the relation, else "gene". A new miss fails, and so does a fixed one or one whose cause changes,
+# until this table is updated, so the benchmark can only get better.
+KNOWN_RELATION_MISSES = {
+    "complete": {
+        ("IS1", "downstream", "EC958_RS30560"): "gene",
+        ("IS1", "upstream", "EC958_RS30140"): "gene",
+        ("IS1", "upstream", "EC958_RS30185"): "gene",
+        ("IS1380", "downstream", "EC958_RS24670"): "gene",
+        ("IS200/IS605", "downstream", "EC958_RS10865"): "gene",
+        ("IS200/IS605", "upstream", "EC958_RS10860"): "gene",
+        ("IS3", "downstream", "EC958_RS16660"): "budget",
+        ("IS3", "downstream", "EC958_RS20820"): "budget",
+        ("IS3", "downstream", "EC958_RS24890"): "gene",
+        ("IS3", "downstream", "EC958_RS28175"): "gene",
+        ("IS3", "downstream", "EC958_RS28255"): "gene",
+        ("IS3", "downstream", "EC958_RS29425"): "gene",
+        ("IS3", "downstream", "EC958_RS30340"): "gene",
+        ("IS3", "upstream", "EC958_RS16650"): "budget",
+        ("IS3", "upstream", "EC958_RS20830"): "gene",
+        ("IS3", "upstream", "EC958_RS24690"): "gene",
+        ("IS3", "upstream", "EC958_RS29355"): "gene",
+        ("IS3", "upstream", "EC958_RS29720"): "gene",
+        ("IS30", "downstream", "EC958_RS16655"): "gene",
+        ("IS5", "downstream", "EC958_RS24665"): "gene",
+        ("IS5", "upstream", "EC958_RS24675"): "gene",
+        ("IS6", "downstream", "EC958_RS25830"): "budget",
+        ("IS6", "downstream", "EC958_RS25840"): "budget",
+        ("IS6", "downstream", "EC958_RS26485"): "gene",
+        ("IS6", "downstream", "EC958_RS29660"): "gene",
+        ("IS6", "upstream", "EC958_RS29475"): "gene",
+        ("IS6", "upstream", "EC958_RS29565"): "gene",
+        ("IS66", "downstream", "EC958_RS01090"): "gene",
+        ("IS66", "downstream", "EC958_RS11750"): "gene",
+        ("IS66", "downstream", "EC958_RS29550"): "gene",
+        ("ISL3", "downstream", "EC958_RS25065"): "gene",
+    },
+    "fragmented": {
+        ("IS1", "downstream", "EC958_RS29430"): "gene",
+        ("IS1", "downstream", "EC958_RS30560"): "gene",
+        ("IS1", "upstream", "EC958_RS30140"): "gene",
+        ("IS1380", "downstream", "EC958_RS24670"): "gene",
+        ("IS200/IS605", "downstream", "EC958_RS10865"): "gene",
+        ("IS200/IS605", "downstream", "EC958_RS11105"): "gene",
+        ("IS200/IS605", "upstream", "EC958_RS10860"): "gene",
+        ("IS200/IS605", "upstream", "EC958_RS11880"): "gene",
+        ("IS200/IS605", "upstream", "EC958_RS19340"): "gene",
+        ("IS21", "downstream", "EC958_RS07600"): "gene",
+        ("IS21", "downstream", "EC958_RS11780"): "gene",
+        ("IS21", "downstream", "EC958_RS24865"): "gene",
+        ("IS21", "upstream", "EC958_RS07585"): "budget",
+        ("IS21", "upstream", "EC958_RS15715"): "budget",
+        ("IS21", "upstream", "EC958_RS30525"): "gene",
+        ("IS3", "downstream", "EC958_RS11060"): "gene",
+        ("IS3", "downstream", "EC958_RS16660"): "gene",
+        ("IS3", "downstream", "EC958_RS20830"): "gene",
+        ("IS3", "downstream", "EC958_RS24890"): "gene",
+        ("IS3", "downstream", "EC958_RS28255"): "gene",
+        ("IS3", "downstream", "EC958_RS29425"): "gene",
+        ("IS3", "downstream", "EC958_RS30340"): "gene",
+        ("IS3", "upstream", "EC958_RS29720"): "gene",
+        ("IS5", "downstream", "EC958_RS24665"): "gene",
+        ("IS5", "upstream", "EC958_RS24675"): "gene",
+        ("IS66", "downstream", "EC958_RS01090"): "gene",
+        ("IS66", "downstream", "EC958_RS11750"): "gene",
+        ("IS66", "downstream", "EC958_RS29550"): "gene",
+        ("IS66", "upstream", "EC958_RS16805"): "gene",
+        ("IS66", "upstream", "EC958_RS30005"): "gene",
+        ("IS66", "upstream", "EC958_RS30575"): "gene",
+        ("ISL3", "downstream", "EC958_RS25065"): "gene",
+    },
+}
+# Found relations whose eris gene does not have the RefSeq CDS's sequence; checked on the complete genome only
+KNOWN_NUCLEOTIDE_MISMATCHES = {("IS3", "upstream", "EC958_RS24680")}
+# Floors for (precision, recall) of DISRUPTED or TRUNCATED against truth disrupted; raise them as eris improves
+MIN_DISRUPTED = {"complete": (0.17, 0.42), "fragmented": (0.05, 0.05)}
+
+
+class GeneSequences:
+    """Collects the coding sequence of every eris gene call, as the _cds.fna output would hold them."""
+
+    def __init__(self):
+        self.by_id = {}
+
+    def write_global_genes(self, contig_id, sequence, genes):
+        for g in genes:
+            # The gene id eris gives each call in Pipeline._process_contig
+            self.by_id[f"{contig_id}_{g.start}_{g.end}"] = g.sequence()
+
+
+def assert_unchanged(found, known, table: str):
+    """A ratchet: what was found must equal the known table, so fixes get noticed as well as regressions."""
+    assert found == known, f"eris changed; if it got better, update {table}"
+
+
+@pytest.fixture(scope="module")
+def placer():
+    return GenePlacer(REFERENCE)
+
+
+@pytest.fixture(scope="module", params=RELATION_BENCHMARKS)
+def relation_benchmark(request, target_db, families, placer):
+    genome_file, replicons = RELATION_BENCHMARKS[request.param]
+    runs, genes = {}, GeneSequences()  # gene calls do not depend on the hops budget
+    for hops in (RELATION_HOPS, REACH_HOPS):
+        with Pipeline(target_db, max_feature_hops=hops, mode='collapse', min_coverage=0.30) as pipeline:
+            loci = list(pipeline(GenomeAssembly.from_file(DATA_DIR / genome_file), genes))
+        runs[hops] = loci
+
+    placements = {}
+
+    def place(gene_id):
+        if gene_id not in placements:
+            placements[gene_id] = placer.place(genes.by_id[gene_id])
+        return placements[gene_id]
+
+    truths = read_truth(RELATION_TRUTH, families, replicons)
+    score = score_relations(truths, runs[RELATION_HOPS], families, place, reach_loci=runs[REACH_HOPS])
+    print(f"\n{request.param}:\n{report(score)}")
+    return request.param, score
+
+
+@pytest.mark.slow
+@needs_relation_data
+def test_relation_misses_do_not_change(relation_benchmark):
+    name, score = relation_benchmark
+    assert_unchanged(score.miss_causes, KNOWN_RELATION_MISSES[name], "KNOWN_RELATION_MISSES")
+
+
+@pytest.mark.slow
+@needs_relation_data
+def test_disrupted_calls_meet_thresholds(relation_benchmark):
+    name, score = relation_benchmark
+    min_precision, min_recall = MIN_DISRUPTED[name]
+    assert score.disrupted_precision >= min_precision
+    assert score.disrupted_recall >= min_recall
+
+
+@pytest.mark.slow
+@needs_relation_data
+def test_matched_flank_sequences_do_not_change(relation_benchmark):
+    name, score = relation_benchmark
+    if name != "complete":
+        pytest.skip("the nucleotide check is ratcheted on the complete genome only")
+    assert_unchanged(score.nucleotide_mismatches, KNOWN_NUCLEOTIDE_MISMATCHES, "KNOWN_NUCLEOTIDE_MISMATCHES")
