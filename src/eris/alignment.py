@@ -120,6 +120,11 @@ class AlignmentRecord:
     cigar: str  # Kept as str to match the array type, can be wrapped in Cigar() if needed
 
     @property
+    def identity(self) -> float:
+        """Target identity: matching bases over the alignment block length, gaps counted."""
+        return self.match / self.length if self.length else 0.0
+
+    @property
     def is_partial(self) -> bool:
         """True if the alignment covers less than 90% of the query sequence."""
         return self.length < (self.q_length * 0.9)
@@ -165,6 +170,11 @@ class AlignmentBatch:
 
     def __len__(self) -> int:
         return len(self.q_starts)
+
+    @property
+    def identities(self) -> np.ndarray:
+        """Vectorized target identity (matches / alignment block length)."""
+        return np.divide(self.matches, self.lengths, out=np.zeros(len(self), dtype=float), where=self.lengths > 0)
 
     @property
     def scores(self) -> np.ndarray:
@@ -398,3 +408,15 @@ class AlignmentBatch:
             quality=self.qualities[idx],
             cigar=self.cigars[idx]
         )
+
+
+# Functions ------------------------------------------------------------------------------------------------------------
+def pooled_identity(records: Iterable[AlignmentRecord]) -> float:
+    """
+    Target identity of a stitched path: all matching bases over all aligned bases of its real fragments.
+
+    Synthetic records (idx == -1) stand for contigs bridged without an alignment, so they are left out.
+    """
+    real = [r for r in records if r.idx != -1]
+    aligned = sum(r.length for r in real)
+    return sum(r.match for r in real) / aligned if aligned else 0.0

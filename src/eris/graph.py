@@ -29,6 +29,10 @@ class Edge(NamedTuple):
         """Returns a new Edge object representing the reverse traversal (v -> u)."""
         return Edge(self.v, self.v_strand, self.u, self.u_strand, self.overlap)
 
+    def complement(self) -> 'Edge':
+        """Returns the same link read on the opposite strands, e.g. 'A+ -> B-' becomes 'B+ -> A-'."""
+        return Edge(self.v, Strand(-self.v_strand), self.u, Strand(-self.u_strand), self.overlap)
+
 
 class Graph:
     """
@@ -123,7 +127,8 @@ class TopologyEngine:
     It provides tools for "stitching" together partial alignments that span
     multiple contigs by finding valid physical paths through the graph.
     """
-    __slots__ = ('_graph', 'contig_lengths', 'contig_depths', 'features', '_visited_nodes', 'mode', 'median_depth')
+    __slots__ = ('_graph', 'contig_lengths', 'contig_depths', 'features', '_visited_nodes', 'mode', 'median_depth',
+                 '_max_overlap')
 
     def __init__(self, edges: Iterable[Edge], contig_lengths: dict[str, int], contig_depths: dict[str, float],
                  features: dict[str, IntervalBatch] = None, mode: str = 'variant', median_depth: float = 1.0):
@@ -136,7 +141,10 @@ class TopologyEngine:
             contig_depths: Dictionary mapping contig ID to read depth.
             features: Dictionary mapping contig ID to its annotated intervals.
         """
-        self._graph = Graph(edges)  # Build the graph from parsed edges
+        # A GFA link is written once but holds on both strands, so add its complement for walking the other way
+        edges = list(edges)
+        self._graph = Graph(edges + [e.complement() for e in edges])
+        self._max_overlap: int = max((e.overlap for e in edges), default=0)
         self.contig_lengths: dict[str, int] = contig_lengths
         self.contig_depths: dict[str, float] = contig_depths
         self.features: dict[str, IntervalBatch] = features or {}
@@ -188,7 +196,7 @@ class TopologyEngine:
                 stack = [(i, [start_frag], {i})]
 
                 best_chain = []
-                best_chain_len = 0
+                best_chain_score = (0, 0)
                 best_chain_used = set()
 
                 while stack:
@@ -203,8 +211,14 @@ class TopologyEngine:
                         next_frag = fragments[j]
                         expected_gap = next_frag.q_start - curr_frag.q_end
 
-                        # Fragments must be sequentially downstream on the query
-                        if expected_gap < -50:
+                        # Fragments must be sequentially downstream on the query; adjacent contigs share
+                        # their edge overlap, so their fragments may overlap on the query by that much
+                        if expected_gap < -(self._max_overlap + 50):
+                            continue
+
+                        # Stitching joins contigs; two fragments on one contig at the right spacing are the inverted
+                        # repeats of a cross-mapping relative, and the graph search would call them adjacent
+                        if next_frag.t_name == curr_frag.t_name:
                             continue
 
                         # Ask the graph if these two fragments physically connect
@@ -247,10 +261,12 @@ class TopologyEngine:
 
                     # If we can't extend this branch further, evaluate its total coverage
                     if not extended:
-                        chain_cov = curr_path[-1].q_end - curr_path[0].q_start
-                        if chain_cov > best_chain_len:
+                        # On equal coverage, prefer the chain through more real fragments over one that
+                        # jumps past them and turns them into synthetic nodes
+                        chain_score = (curr_path[-1].q_end - curr_path[0].q_start, len(curr_used))
+                        if chain_score > best_chain_score:
                             best_chain = curr_path
-                            best_chain_len = chain_cov
+                            best_chain_score = chain_score
                             best_chain_used = curr_used
 
                 # If the DFS successfully chained multiple fragments together
@@ -271,17 +287,13 @@ class TopologyEngine:
                     # Consume ALL fragments from ALL chains to ensure the alternate
                     # bubble flanks don't accidentally get processed as unstitched debris
                     for chain in qname_chains:
-                        for f in chain:
-                            if f.idx != -1:
-                                used_records.add((f.t_name, f.idx))
+                        self._consume_chain(chain, alignments, used_records)
 
                 else:
                     # VARIANT MODE: Keep all resolved structural paths
                     for chain in qname_chains:
                         resolved_paths.append(chain)
-                        for f in chain:
-                            if f.idx != -1:
-                                used_records.add((f.t_name, f.idx))
+                        self._consume_chain(chain, alignments, used_records)
 
                 del qname_chains # Clean up for the next IS target
 
@@ -299,6 +311,17 @@ class TopologyEngine:
                 cleaned_alignments[contig_id] = intact_batch
 
         return cleaned_alignments, resolved_paths
+
+    @staticmethod
+    def _consume_chain(chain: list['AlignmentRecord'], alignments: dict, used_records: set) -> None:
+        """Marks every real alignment that a stitched chain accounts for, so it is not reported again as local."""
+        for f in chain:
+            if f.idx != -1:
+                used_records.add((f.t_name, f.idx))
+            elif (batch := alignments.get(f.t_name)) is not None:
+                # Synthetic nodes claim a whole intermediate contig, so any alignment on it belongs to this path
+                inside = (batch.t_starts >= f.t_start) & (batch.t_ends <= f.t_end)
+                used_records.update((f.t_name, int(i)) for i in np.flatnonzero(inside))
 
     def _build_stitching_payload(self, h_u: 'AlignmentRecord', h_v: 'AlignmentRecord', path_contigs: list[str]) -> list[
         'AlignmentRecord']:
@@ -400,7 +423,8 @@ class TopologyEngine:
     def _find_collapsed_path(self, start_ctg: str, start_strand: Strand, target_ctg: str,
                              target_strand: Strand, expected_len: int, tolerance: int) -> list[dict]:
         """
-        Greedy pathfinder for 'collapse' mode. Always traverses the highest depth neighbor option if finds multiple branchs.
+        Greedy pathfinder for 'collapse' mode. Always traverses the highest depth neighbor option if finds multiple branchs,
+        and backtracks to the next deepest when that branch cannot reach the target.
         """
         # Stack payload: (current_contig, exit_strand, path_list, accumulated_len, peak_depth)
         start_dp = float(self.contig_depths.get(start_ctg, 1.0))
@@ -419,33 +443,27 @@ class TopologyEngine:
             if dist > expected_len + tolerance:
                 continue
 
-            # Greedy Graph Traversal: Find the single deepest valid neighbor
-            deepest_neighbor = None
-            highest_depth = -1
+            # Greedy Graph Traversal: push the shallowest first so the deepest valid neighbor is popped next
+            neighbors = [e for e in self._graph.get_neighbors(curr_ctg)
+                         if e.u_strand == curr_strand and e.v not in path]  # Prevent cyclic infinite loops
+            # Sort on the name too, as set order is not stable between runs
+            neighbors.sort(key=lambda e: (self.contig_depths.get(e.v, 1.0), e.v))
 
-            for edge in self._graph.get_neighbors(curr_ctg):
-                if edge.u_strand != curr_strand: continue
-                if edge.v in path: continue # Prevent cyclic infinite loops
-
-                n_dp = self.contig_depths.get(edge.v, 1.0)
-                if n_dp > highest_depth:
-                    highest_depth = n_dp
-                    deepest_neighbor = edge
-
-            if deepest_neighbor:
-                n_ctg = deepest_neighbor.v
+            for edge in neighbors:
+                n_ctg = edge.v
+                n_dp = self.contig_depths.get(n_ctg, 1.0)
                 n_len = self.contig_lengths.get(n_ctg, 0)
-                overlap_len = getattr(deepest_neighbor, 'overlap', 0)
+                overlap_len = getattr(edge, 'overlap', 0)
 
                 # Absolute normalization for target anchor
                 added_dist = (n_len - overlap_len) if n_ctg != target_ctg else -overlap_len
 
                 stack.append((
                     n_ctg,
-                    deepest_neighbor.v_strand,
+                    edge.v_strand,
                     path + [n_ctg],
                     dist + added_dist,
-                    max(max_dp, highest_depth) # Track the peak depth of the collapsed hub
+                    max(max_dp, n_dp) # Track the peak depth of the collapsed hub
                 ))
 
         # If it reaches a dead end before finding the target anchor

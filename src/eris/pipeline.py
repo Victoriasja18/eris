@@ -15,7 +15,7 @@ from pyfgs import GeneFinder, Model, Gene, Mutation
 
 from eris.io import TargetDatabase, GenomeAssembly
 from eris.graph import TopologyEngine
-from eris.alignment import AlignmentBatch, AlignmentRecord
+from eris.alignment import AlignmentBatch, AlignmentRecord, pooled_identity
 from eris.synonyms import SynonymResolver
 from eris.interval import IntervalBatch, Context, Strand, Interval
 from eris.constants import FeatureType, Orientation, Effect
@@ -50,6 +50,7 @@ class GenomicFeature:
     type: FeatureType
     segments: list[LocationSegment]
     qualifiers: dict[str, list[str]] = field(default_factory=dict)
+    identity: Optional[float] = None  # Target identity, set only on target features
 
     @property
     def is_multi_contig(self) -> bool:
@@ -209,12 +210,14 @@ class LocusBuilder:
         self.features = features or {}
         self.genes = genes or {}
 
-    def assemble(self, alignments: dict, min_coverage: float = 0.30) -> Iterable['Locus']:
+    def assemble(self, alignments: dict, min_coverage: float = 0.30, min_identity: float = 0.0) -> Iterable['Locus']:
         """
         The main entry point for generating loci.
 
         Stitches graph-spanning alignments and processes local alignments
-        to produce a sequence of Locus objects.
+        to produce a sequence of Locus objects. Filtering happens after stitching,
+        so a low-identity fragment can still join a stitched path; the path is then
+        kept or dropped on its pooled target identity.
         """
 
         # Attempt split alignment resolution if topology engine is present
@@ -222,7 +225,7 @@ class LocusBuilder:
             cleaned_alignments, resolved_paths = self.topology_engine.resolve_split_alignments(alignments)
             for path in resolved_paths:
                 coverage = (path[-1].q_end - path[0].q_start) / path[0].q_length
-                if coverage >= min_coverage:
+                if coverage >= min_coverage and pooled_identity(path) >= min_identity:
                     yield self._stitch(path)
         else:
             cleaned_alignments = alignments
@@ -230,7 +233,8 @@ class LocusBuilder:
         # Filter and yield LOCAL (unstitched) alignments
         for contig_id, batch in cleaned_alignments.items():
             cov_mask = ((batch.q_ends - batch.q_starts) / batch.q_lengths) >= min_coverage
-            intact_batch = batch.filter(cov_mask)
+            id_mask = batch.identities >= min_identity
+            intact_batch = batch.filter(cov_mask & id_mask)
 
             if len(intact_batch) > 0:
                 contig_gene_intervals = self.topology_engine.features.get(contig_id, IntervalBatch.empty()) if self.topology_engine else self.features.get(contig_id, IntervalBatch.empty())
@@ -345,7 +349,8 @@ class LocusBuilder:
 
                 target_features = [
                     GenomicFeature(t.q_name, self.target_feature_type,
-                                   [LocationSegment(contig, t.t_start, t.t_end, Strand(t.strand))])
+                                   [LocationSegment(contig, t.t_start, t.t_end, Strand(t.strand))],
+                                   identity=t.identity)
                     for t in targets
                 ]
 
@@ -407,7 +412,8 @@ class LocusBuilder:
         target_feature = GenomicFeature(
             id=f"{first.q_name}_stitched",
             type=self.target_feature_type,
-            segments=segments
+            segments=segments,
+            identity=pooled_identity(fragments)
         )
 
         locus = Locus(
@@ -463,12 +469,13 @@ class Pipeline:
     gene calling, graph building, and locus assembly. Uses a thread pool
     for parallel contig processing.
     """
-    __slots__ = ('target_db', '_gene_finder', 'max_feature_hops', 'locus_tolerance', '_executor', 'mode', 'min_coverage', 'min_identity', 'synonyms')
+    __slots__ = ('target_db', '_gene_finder', 'max_feature_hops', 'locus_tolerance', '_executor', 'mode', 'min_coverage',
+                 'min_identity', 'synonyms')
     _THREAD_LOCAL = thread_local()
 
     def __init__(self, target_db: 'TargetDatabase', max_feature_hops: int = 3, locus_tolerance: int = 0,
                  max_workers: Optional[int] = None, mode: str = 'variant', min_coverage: float = 0.30,
-                 min_identity: float = 0.80, synonyms: Optional[SynonymResolver] = None):
+                 min_identity: float = 0.0, synonyms: Optional[SynonymResolver] = None):
         """
         Initialize the Pipeline.
 
@@ -477,6 +484,9 @@ class Pipeline:
             max_feature_hops: Contextual search depth.
             locus_tolerance: Merging tolerance for adjacent hits.
             max_workers: Number of threads for parallel processing.
+            mode: Resolution mode, 'variant' or 'collapse'.
+            min_coverage: Minimum target coverage for a locus target to be reported.
+            min_identity: Minimum target identity for a locus target to be reported.
             synonyms: If given, synonymous IS targets are renamed to the first-seen name of their group before locus building, so e.g. IS1A and IS1B hits of one insertion can be stitched together.
         """
         self.target_db = target_db
@@ -508,7 +518,7 @@ class Pipeline:
 
         # Doing alignment using mappy
         if alns := list(self.target_db.aligner.map(str(contig_seq), buf=self._THREAD_LOCAL.buf)):
-            aln_batch = (AlignmentBatch.from_mappy(contig_id, len(contig_seq), alns, self.min_identity)
+            aln_batch = (AlignmentBatch.from_mappy(contig_id, len(contig_seq), alns)
                          .swap_sides()
                          .cull_overlaps()
                          .extend_is_bounds())
@@ -577,7 +587,7 @@ class Pipeline:
             genes=gene_cds
         )
 
-        yield from builder.assemble(alignments, min_coverage=self.min_coverage)
+        yield from builder.assemble(alignments, min_coverage=self.min_coverage, min_identity=self.min_identity)
 
 class LinearPipeline(Pipeline):
     """
@@ -610,7 +620,8 @@ class LinearPipeline(Pipeline):
 
                 # Directly process local alignments on this contig
                 cov_mask = ((a_batch.q_ends - a_batch.q_starts) / a_batch.q_lengths) >= self.min_coverage
-                intact_batch = a_batch.filter(cov_mask)
+                id_mask = a_batch.identities >= self.min_identity
+                intact_batch = a_batch.filter(cov_mask & id_mask)
 
                 for locus in builder._build_local(contig_id, intact_batch, gene_intervals):
                     yield locus

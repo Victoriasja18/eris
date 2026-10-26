@@ -61,11 +61,13 @@ eris -i assembly.gfa -d targets.fasta -o results/sample_A
 * `-f`, `--feature-type`: The type of feature to annotate (default: `CDS`).
 * `--hops`: Maximum number of contextual genes to sweep upstream/downstream (default: `3`).
 * `--tolerance`: Distance tolerance in base pairs for merging clustered alignments (default: `0`).
+* `-c`, `--min-coverage`: Minimum target coverage, a fraction from `0.0` to `1.0`, required to report a locus target (default: `0.3`).
+* `--min-identity`: Minimum target identity (matching bases over aligned bases, gaps counted), a fraction from `0.0` to `1.0`, required to report a locus target (default: `0.0`, no filtering). A stitched locus is kept or dropped on the identity pooled over its fragments.
 
 ### Outputs
 Depending on the arguments provided, eris will output:
 
-1. **`{prefix}_report.tsv`**: A detailed report of every resolved locus, including targets, context (INSIDE, UPSTREAM, DOWNSTREAM), biological effects, topological hops, and fractional depths.
+1. **`{prefix}_report.tsv`**: A detailed report of every resolved locus, including targets and their target identity, context (INSIDE, UPSTREAM, DOWNSTREAM), biological effects, topological hops, and fractional depths.
 2. **`{prefix}_loci.fasta`**: The stitched nucleotide sequences for each assembled structural variant.
 3. **`{prefix}_assembly.gff`**: GFF3 annotation of the global features.
 4. **`{prefix}_proteins.faa`** / **`{prefix}_cds.fna`**: Amino acid / nucleotide fasta of the genes related to each IS locus (INSIDE and flanking genes reported in `_report.tsv`); unrelated assembly-wide CDS are omitted.

@@ -22,6 +22,18 @@ class Log:
         if flush: self.stream.flush()
 
 
+# Functions ------------------------------------------------------------------------------------------------------------
+def fraction(value: str) -> float:
+    """Argparse type for a fraction from 0.0 to 1.0."""
+    try:
+        f = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a number") from None
+    if not 0.0 <= f <= 1.0:
+        raise argparse.ArgumentTypeError(f"{value} is not between 0.0 and 1.0")
+    return f
+
+
 # Main CLI entry-point -------------------------------------------------------------------------------------------------
 def main():
 
@@ -60,18 +72,18 @@ def main():
                         help='Maximum number of worker threads for alignment and CDS prediction')
     pipeline_args.add_argument('-m', '--mode', choices=['variant', 'collapse'], default='variant',
                         help='Resolution mode: "variant" for all possible structural path, "collapse" for a consensus')
-    pipeline_args.add_argument('-c', '--min-coverage', type=float, default=0.30, metavar='',
-                        help='Minimum coverage fraction (0.0 to 1.0 required to report a locus target)')
-    pipeline_args.add_argument('--min-identity', type=float, default=0.80, metavar='',
-                        help='Minimum sequence identity (0.0 to 1.0) to keep an IS alignment; '
-                             'lower values recover diverged IS but may increase false positives')
+    pipeline_args.add_argument('-c', '--min-coverage', type=fraction, default=0.30, metavar='',
+                        help='Minimum target coverage (0.0 to 1.0) required to report a locus target')
+    pipeline_args.add_argument('--min-identity', type=fraction, default=0.0, metavar='',
+                        help='Minimum target identity (0.0 to 1.0; matching bases over aligned bases, gaps counted) '
+                             'required to report a locus target. Stitched loci are pooled over their fragments')
     pipeline_args.add_argument('--merge-synonyms', nargs='?', const=True, default=None, metavar='IS.csv',
                         help='Rename IS targets that ISfinder lists as synonyms/isoforms (e.g. IS1A/IS1B, IS30/IS30D) '
                              'to the first name found in the genome, so they can be stitched and counted together. '
                              'Downloads and caches ISfinder\'s IS.csv, or give a local IS.csv path')
 
     targets = parser.add_argument_group('🎯', 'Target arguments')
-    targets.add_argument('-f', '--feature-type', choices=[e.value for e in FeatureType], metavar='', 
+    targets.add_argument('-f', '--feature-type', choices=[e.value for e in FeatureType], metavar='',
                          default=FeatureType.CDS.value, help='Type of feature to annotate')
     targets.add_argument('--indexing-threads', type=int, default=3, metavar='',
                         help='Number of threads to use for indexing if not already indexed')
