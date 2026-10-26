@@ -1,4 +1,4 @@
-from typing import NamedTuple, Iterable
+from typing import NamedTuple, Iterable, KeysView
 from collections import defaultdict
 
 import numpy as np
@@ -58,9 +58,11 @@ class Graph:
         """
         # Adjacency list: maps node ID to a set of outgoing Edge objects *starting* uom that node.
         # For undirected graphs, this will include edges representing reverse traversal.
-        self.adj: dict[str, set[Edge]] = defaultdict(set)
+        # Edges are kept in dicts (ordered sets): a set's order depends on the string hash seed, which made
+        # traversal, and so the reported flanks, change between runs on the same assembly
+        self.adj: dict[str, dict[Edge, None]] = defaultdict(dict)
         # In-degree adjacency list for efficient reverse lookups
-        self.in_adj: dict[str, set[Edge]] = defaultdict(set)
+        self.in_adj: dict[str, dict[Edge, None]] = defaultdict(dict)
         # Set of unique Edge objects fundamentally added to the graph.
         self.edges: set[Edge] = set()
         self._nodes: set[str] = set()
@@ -99,25 +101,25 @@ class Graph:
         self.edges.add(edge)  # Add the primary edge representation if it's new
 
         # Check if this specific edge object is already in the adjacency list for the 'u' node
-        self.adj[edge.u].add(edge)
-        self.in_adj[edge.v].add(edge)
+        self.adj[edge.u][edge] = None
+        self.in_adj[edge.v][edge] = None
 
         # If the graph is undirected, add reverse connectivity as well
         if not self.directed:
             # Create a conceptual reverse edge for traversal and add to the adjacency list of the 'v' node
             reverse_edge = edge.reverse()
-            self.in_adj[edge.u].add(reverse_edge)
-            self.adj[edge.v].add(reverse_edge)
+            self.in_adj[edge.u][reverse_edge] = None
+            self.adj[edge.v][reverse_edge] = None
             # Note: We do not add the reverse_edge to self.edges unless it's explicitly added later by the user
 
-    def get_neighbors(self, node_id: str) -> set[Edge]:
+    def get_neighbors(self, node_id: str) -> KeysView[Edge]:
         """
-        Returns the set of outgoing edges for a given node ID.
+        Returns the outgoing edges for a given node ID, in the order they were added.
 
         Respects graph directionality. For undirected graphs, this includes
         implicit reverse connections.
         """
-        return self.adj.get(node_id, set())
+        return self.adj.get(node_id, {}).keys()
 
 
 class TopologyEngine:

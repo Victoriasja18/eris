@@ -286,3 +286,12 @@ def test_resolve_does_not_stitch_fragments_on_one_contig(mode):
 
     assert paths == []
     assert len(cleaned["chr"]) == 2
+
+
+def test_neighbours_come_back_in_the_order_their_links_were_read():
+    # Set order depends on the string hash seed, which made flanks change between runs on the same assembly
+    edges = [Edge("hub", Strand.FORWARD, f"ctg{i}", Strand.FORWARD) for i in range(10)]
+    graph = Graph(edges, directed=False)
+
+    assert list(graph.get_neighbors("hub")) == edges
+    assert list(graph.get_neighbors("ctg3")) == [edges[3].reverse()]
