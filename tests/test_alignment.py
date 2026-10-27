@@ -120,3 +120,38 @@ def test_pooled_identity_leaves_out_synthetic_records():
                                 match=0, mismatch=0, quality=0, cigar="*")
 
     assert pooled_identity([real_a, synthetic, real_b]) == pytest.approx((38 + 48) / (40 + 50))
+
+
+def _two_hits(names, matches, t_starts, t_ends, q_ends=(500, 500)):
+    return AlignmentBatch(
+        q_names=np.array(names, dtype=object), q_lengths=np.array([1000, 1000], dtype=np.int32),
+        q_starts=np.array([0, 0], dtype=np.int32), q_ends=np.array(q_ends, dtype=np.int32),
+        t_names=np.array(["ctgA", "ctgA"], dtype=object), t_lengths=np.array([2000, 2000], dtype=np.int32),
+        t_starts=np.array(t_starts, dtype=np.int32), t_ends=np.array(t_ends, dtype=np.int32),
+        strands=np.array([Strand.FORWARD, Strand.FORWARD], dtype=np.int8),
+        lengths=np.array([e - s for s, e in zip(t_starts, t_ends)], dtype=np.int32),
+        matches=np.array(matches, dtype=np.int32), mismatches=np.array([0, 0], dtype=np.int32),
+        qualities=np.array([60, 60], dtype=np.int32), cigars=np.array(["*", "*"], dtype=object)
+    )
+
+
+def test_with_near_ties_keeps_a_relative_that_nearly_ties_a_partial_winner():
+    batch = _two_hits(["ISx", "ISy"], [500, 490], [0, 0], [500, 500])
+    assert sorted(batch.with_near_ties(batch.cull_overlaps()).q_names) == ["ISx", "ISy"]
+
+
+def test_with_near_ties_drops_a_clearly_worse_relative():
+    batch = _two_hits(["ISx", "ISy"], [500, 400], [0, 0], [500, 500])
+    assert list(batch.with_near_ties(batch.cull_overlaps()).q_names) == ["ISx"]
+
+
+def test_with_near_ties_leaves_a_full_length_winner_alone():
+    batch = _two_hits(["ISx", "ISy"], [1000, 990], [0, 0], [1000, 1000], q_ends=(1000, 1000))
+    assert list(batch.with_near_ties(batch.cull_overlaps()).q_names) == ["ISx"]
+
+
+def test_cull_overlaps_per_query_only_culls_the_same_name():
+    relatives = _two_hits(["ISx", "ISy"], [500, 490], [0, 0], [500, 500])
+    assert len(relatives.cull_overlaps(per_query=True)) == 2
+    duplicates = _two_hits(["ISx", "ISx"], [500, 490], [0, 0], [500, 500])
+    assert len(duplicates.cull_overlaps(per_query=True)) == 1

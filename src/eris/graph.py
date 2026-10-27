@@ -1,4 +1,4 @@
-from typing import NamedTuple, Iterable, KeysView, Callable
+from typing import NamedTuple, Iterable, KeysView, Callable, Optional
 from collections import defaultdict
 from functools import partial
 
@@ -161,7 +161,8 @@ class TopologyEngine:
         self.mode: str = mode
 
 
-    def resolve_split_alignments(self, alignments: dict) -> tuple[dict, list[list['AlignmentRecord']]]:
+    def resolve_split_alignments(self, alignments: dict, candidates: Optional[dict] = None
+                                 ) -> tuple[dict, list[list['AlignmentRecord']]]:
         """
         Stitch together partial alignments that span multiple graph nodes.
 
@@ -170,6 +171,9 @@ class TopologyEngine:
 
         Args:
             alignments: Dictionary mapping contig ID to AlignmentBatch.
+            candidates: Optional `alignments` plus near-tied relatives (AlignmentBatch.with_near_ties).
+                Every name is then stitched over them, and where paths of different names claim the
+                same place, the path with the most matching bases wins, so one name covers the path.
 
         Returns:
             tuple: (cleaned_alignments, resolved_paths)
@@ -177,9 +181,10 @@ class TopologyEngine:
                 - resolved_paths: Lists of AlignmentRecords forming stitched paths.
         """
         partial_alns = defaultdict(list)
+        units = []  # (reported chain, every chain it accounts for)
 
         # 1. Gather all partial fragments (Do NOT remove them from the main pipeline yet)
-        for contig_id, batch in alignments.items():
+        for contig_id, batch in (candidates if candidates is not None else alignments).items():
             for i in range(len(batch)):
                 rec = batch.get_record(i)
                 if rec.is_partial:
@@ -193,6 +198,7 @@ class TopologyEngine:
             # Sort strictly by 5' -> 3' query coordinates
             fragments.sort(key=lambda x: x.q_start)
             used_in_this_qname = set()
+            qname_chains = []
 
             # Shortcuts for _fits, to skip the graph search, by the largest link overlap at each end: a fragment that
             # doesn't reach its contig end by it reaches it by no link's, and as a link never overlaps more than either
@@ -287,30 +293,27 @@ class TopologyEngine:
 
                 # If the DFS successfully chained multiple fragments together
                 if len(best_chain_used) > 1:
-
                     # Temporarily store all valid chains for this specific IS
-                    if 'qname_chains' not in locals(): qname_chains = []
                     qname_chains.append(best_chain)
                     used_in_this_qname.update(best_chain_used)
 
-            if 'qname_chains' in locals() and qname_chains:
+            if qname_chains:
                 if self.mode == 'collapse':
-                    # Pick the single chain that covers the most IS sequence
+                    # Pick the single chain that covers the most IS sequence; it also accounts for
+                    # ALL other chains so the alternate bubble flanks aren't processed as unstitched debris
                     dominant_chain = max(qname_chains, key=lambda c: c[-1].q_end - c[0].q_start)
-                    resolved_paths.append(dominant_chain)
-
-                    # Consume ALL fragments from ALL chains to ensure the alternate
-                    # bubble flanks don't accidentally get processed as unstitched debris
-                    for chain in qname_chains:
-                        self._consume_chain(chain, alignments, used_records)
-
+                    units.append((dominant_chain, qname_chains))
                 else:
                     # VARIANT MODE: Keep all resolved structural paths
-                    for chain in qname_chains:
-                        resolved_paths.append(chain)
-                        self._consume_chain(chain, alignments, used_records)
+                    units.extend((chain, [chain]) for chain in qname_chains)
 
-                del qname_chains # Clean up for the next IS target
+        if candidates is None:
+            for chain, accounted in units:
+                resolved_paths.append(chain)
+                for c in accounted:
+                    self._consume_chain(c, alignments, used_records)
+        else:
+            resolved_paths = self._best_named_paths(units, alignments, used_records)
 
         # 3. Rebuild cleaned alignments (The Safety Net)
         cleaned_alignments = {}
@@ -326,6 +329,48 @@ class TopologyEngine:
                 cleaned_alignments[contig_id] = intact_batch
 
         return cleaned_alignments, resolved_paths
+
+    def _best_named_paths(self, units: list, alignments: dict, used_records: set,
+                          max_overlap_fraction: float = 0.1) -> list[list['AlignmentRecord']]:
+        """
+        Keeps, among chains of different names that claim the same places, the one with the most matching bases.
+
+        A place is a contig span: a real fragment's alignment, or a synthetic node's whole span. Chains are
+        accepted best first and a chain is dropped if any of its places overlaps (more than
+        `max_overlap_fraction` of the shorter span) a place already claimed. An original alignment is consumed,
+        whatever its name, when claimed places cover most of it, so a short piece at its edge does not take
+        a longer hit of another IS with it.
+        """
+        claimed = defaultdict(list)  # contig -> [(start, end, name)]
+
+        def overlap(s, e, cs, ce):
+            return min(e, ce) - max(s, cs) > max_overlap_fraction * min(e - s, ce - cs)
+
+        def taken(t, s, e, name):
+            # Paths of the same IS (variant mode) may share places; only another name blocks
+            return any(overlap(s, e, cs, ce) and cn != name for cs, ce, cn in claimed[t])
+
+        resolved_paths = []
+        for chain, accounted in sorted(units, key=lambda u: sum(int(f.match) for f in u[0] if f.idx != -1),
+                                       reverse=True):
+            name = chain[0].q_name
+            if any(taken(f.t_name, f.t_start, f.t_end, name) for f in chain):
+                continue
+            resolved_paths.append(chain)
+            for c in accounted:
+                for f in c:
+                    if c is chain or not taken(f.t_name, f.t_start, f.t_end, name):
+                        claimed[f.t_name].append((int(f.t_start), int(f.t_end), name))
+
+        for t, places in claimed.items():
+            if (batch := alignments.get(t)) is None:
+                continue
+            for i in range(len(batch)):
+                s, e = int(batch.t_starts[i]), int(batch.t_ends[i])
+                covered = sum(max(0, min(e, ce) - max(s, cs)) for cs, ce, _ in places)
+                if covered > 0.5 * (e - s):
+                    used_records.add((t, i))
+        return resolved_paths
 
     @staticmethod
     def _consume_chain(chain: list['AlignmentRecord'], alignments: dict, used_records: set) -> None:
