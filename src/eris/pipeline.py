@@ -133,23 +133,30 @@ class Locus:
 
     def extract_sequence(self, genome: 'GenomeAssembly') -> str:
         """
-        Extracts the full nucleotide sequence of the locus from the assembly.
+        Extracts the nucleotide sequence of the locus from the assembly.
 
-        Handles multi-contig loci by stitching segments together in graph order.
+        A local locus is its slice of the contig. A stitched locus follows its contig path: each contig on the strand
+        it is read on, the edge overlap with the contig before it counted once, cut to the ends of the target on the
+        first and last contigs.
         """
-        if "|" not in self.contig:
-            # Single-contig locus: Exact coordinate slicing
-            # (Biopython Seq objects handle the slicing natively)
+        if len(segments := self.targets[0].segments) == 1:
             return str(genome[self.contig][self.start:self.end])
 
-        # Multi-contig stitched locus:
-        # Note: To get the nucleotide-perfect stitched string without duplicating
-        # the graph overlaps, we fetch the full length of the traversed contigs.
-        seq_parts = []
-        for ctg in self.contig.split('|'):
-            seq_parts.append(str(genome[ctg]))
+        parts, prev = [], None
+        for seg in segments:
+            seq = genome[seg.contig]
+            if seg.strand == Strand.REVERSE:
+                seq = seq.reverse_complement()
+            skip = genome.overlap(prev.contig, prev.strand, seg.contig, seg.strand) if prev else 0
+            parts.append(str(seq[skip:]))
+            prev = seg
+        path = "".join(parts)
 
-        return "".join(seq_parts)
+        # Bases before the target on the first contig and after it on the last, as each is read
+        first, last = segments[0], segments[-1]
+        head = first.start if first.strand != Strand.REVERSE else len(genome[first.contig]) - first.end
+        tail = len(genome[last.contig]) - last.end if last.strand != Strand.REVERSE else last.start
+        return path[head:len(path) - tail]
 
 # Classes --------------------------------------------------------------------------------------------------------------
 class LocusBuilder:
