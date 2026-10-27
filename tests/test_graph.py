@@ -327,3 +327,25 @@ def test_variant_mode_shares_the_flank_budget_across_branches():
 
     assert _flanks(engine, Strand.FORWARD, 1) == [("d0", 0)]
     assert _flanks(engine, Strand.REVERSE, 1) == [("u0", 2)]
+
+
+@pytest.mark.parametrize("mode", ["variant", "collapse"])
+def test_synthetic_node_carries_the_strand_its_contig_is_entered_on(mode):
+    # IS1 runs off ctgA, through ctgB read backwards ('ctgA+ -> ctgB-'), and into ctgC
+    edges = [
+        Edge("ctgA", Strand.FORWARD, "ctgB", Strand.REVERSE, overlap=0),
+        Edge("ctgB", Strand.REVERSE, "ctgC", Strand.FORWARD, overlap=0),
+    ]
+    contig_lengths = {"ctgA": 1000, "ctgB": 500, "ctgC": 1000}
+    contig_depths = {"ctgA": 10.0, "ctgB": 10.0, "ctgC": 10.0}
+    engine = TopologyEngine(edges, contig_lengths, contig_depths, mode=mode)
+
+    alignments = {
+        "ctgA": _fragment("IS1", 2000, 0, 1000, "ctgA", 1000, 0, 1000),
+        "ctgC": _fragment("IS1", 2000, 1500, 2000, "ctgC", 1000, 0, 500),
+    }
+
+    _, paths = engine.resolve_split_alignments(alignments)
+
+    assert [(f.t_name, Strand(f.strand)) for f in paths[0]] == [
+        ("ctgA", Strand.FORWARD), ("ctgB", Strand.REVERSE), ("ctgC", Strand.FORWARD)]

@@ -253,8 +253,9 @@ class TopologyEngine:
                             best_p_idx = np.argmax(scores)
                             if scores[best_p_idx] > 0.05:  # Biological winner
 
-                                winning_contigs = paths[best_p_idx]['contigs']
-                                extension = self._build_stitching_payload(curr_frag, next_frag, winning_contigs)
+                                winning = paths[best_p_idx]
+                                extension = self._build_stitching_payload(curr_frag, next_frag, winning['contigs'],
+                                                                          winning['strands'])
 
                                 # Extend the path with the synthetic nodes + next_frag and recurse!
                                 new_path = curr_path + extension[1:]
@@ -324,18 +325,19 @@ class TopologyEngine:
                 inside = (batch.t_starts >= f.t_start) & (batch.t_ends <= f.t_end)
                 used_records.update((f.t_name, int(i)) for i in np.flatnonzero(inside))
 
-    def _build_stitching_payload(self, h_u: 'AlignmentRecord', h_v: 'AlignmentRecord', path_contigs: list[str]) -> list[
-        'AlignmentRecord']:
+    def _build_stitching_payload(self, h_u: 'AlignmentRecord', h_v: 'AlignmentRecord', path_contigs: list[str],
+                                 path_strands: list[Strand]) -> list['AlignmentRecord']:
         """
         Converts a list of graph contig names into a continuous sequence of AlignmentRecords.
 
         Generates 'synthetic' records for unaligned intermediate nodes so they
-        can be processed by the LocusBuilder as part of a single path.
+        can be processed by the LocusBuilder as part of a single path. Each synthetic record
+        takes the strand its contig was entered on, as read in the target's direction.
         """
         payload = [h_u]
 
         # Iterate over only the intermediate contigs (excluding the h_u and h_v anchors)
-        for ctg in path_contigs[1:-1]:
+        for ctg, strand in zip(path_contigs[1:-1], path_strands[1:-1]):
             ctg_len = self.contig_lengths.get(ctg, 0)
 
             # Create a synthetic alignment that claims the entire unaligned contig
@@ -349,7 +351,7 @@ class TopologyEngine:
                 t_length=ctg_len,
                 t_start=0,  # The entire contig is part of the path
                 t_end=ctg_len,
-                strand=Strand.FORWARD,  # Default to forward for the traversal sequence
+                strand=strand,
                 length=ctg_len,
                 match=0,
                 mismatch=0,
@@ -376,19 +378,20 @@ class TopologyEngine:
             tolerance: bp tolerance for the path length matching the expected length.
 
         Returns:
-            list[dict]: Valid paths found, with 'contigs', 'length', and 'min_depth'.
+            list[dict]: Valid paths found, with 'contigs', 'strands' (each contig's entry strand), 'length', and
+                'min_depth'.
         """
-        # Stack payload: (current_contig, exit_strand, path_list, accumulated_len, bottleneck_depth)
-        stack = [(start_ctg, start_strand, [start_ctg], 0, float('inf'))]
+        # Stack payload: (current_contig, exit_strand, path_list, strand_list, accumulated_len, bottleneck_depth)
+        stack = [(start_ctg, start_strand, [start_ctg], [start_strand], 0, float('inf'))]
         valid_paths = []
 
         while stack:
-            curr_ctg, curr_strand, path, dist, min_dp = stack.pop()
+            curr_ctg, curr_strand, path, strands, dist, min_dp = stack.pop()
 
             # Base Case: Reached the Sink anchor
             if curr_ctg == target_ctg:
                 if curr_strand == target_strand:  # Did we arrive on the correct biological strand?
-                    valid_paths.append({'contigs': path, 'length': dist, 'min_depth': min_dp})
+                    valid_paths.append({'contigs': path, 'strands': strands, 'length': dist, 'min_depth': min_dp})
                 continue
 
             # Prune: We have wandered too far down a dead end
@@ -415,6 +418,7 @@ class TopologyEngine:
                     n_ctg,
                     edge.v_strand,
                     path + [n_ctg],
+                    strands + [edge.v_strand],
                     dist + added_dist,
                     min(min_dp, n_dp)
                 ))
@@ -427,17 +431,17 @@ class TopologyEngine:
         Greedy pathfinder for 'collapse' mode. Always traverses the highest depth neighbor option if finds multiple branchs,
         and backtracks to the next deepest when that branch cannot reach the target.
         """
-        # Stack payload: (current_contig, exit_strand, path_list, accumulated_len, peak_depth)
+        # Stack payload: (current_contig, exit_strand, path_list, strand_list, accumulated_len, peak_depth)
         start_dp = float(self.contig_depths.get(start_ctg, 1.0))
-        stack = [(start_ctg, start_strand, [start_ctg], 0, start_dp)]
+        stack = [(start_ctg, start_strand, [start_ctg], [start_strand], 0, start_dp)]
 
         while stack:
-            curr_ctg, curr_strand, path, dist, max_dp = stack.pop()
+            curr_ctg, curr_strand, path, strands, dist, max_dp = stack.pop()
 
             # Base Case: Reached the Sink anchor
             if curr_ctg == target_ctg:
                 if curr_strand == target_strand:
-                    return [{'contigs': path, 'length': dist, 'min_depth': max_dp}] 
+                    return [{'contigs': path, 'strands': strands, 'length': dist, 'min_depth': max_dp}]
                 continue
 
             # Prune: We have wandered too far down a dead end
@@ -463,6 +467,7 @@ class TopologyEngine:
                     n_ctg,
                     edge.v_strand,
                     path + [n_ctg],
+                    strands + [edge.v_strand],
                     dist + added_dist,
                     max(max_dp, n_dp) # Track the peak depth of the collapsed hub
                 ))
