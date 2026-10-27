@@ -219,6 +219,8 @@ class ReportRow:
         locus_id: Unique identifier for the assembled structural variant locus.
         target: The mobile genetic element(s) or query sequences found in this locus.
         target_identity: Target identity of each target, comma-separated in the same order as `target`.
+        contig_path: The contigs the target runs through in its own direction, each with the strand it is read on
+            (e.g. `ctgA+,ctgB-,ctgC+`); a single contig for a local locus.
         gene_id: The identifier of the contextual passenger or flanking gene.
         context: The spatial relationship (e.g., INSIDE, UPSTREAM) of the gene to the target.
         dist_bp: Distance in base pairs between the gene and the target element.
@@ -230,6 +232,7 @@ class ReportRow:
     locus_id: str
     target: str
     target_identity: str
+    contig_path: str
     gene_id: str
     context: str
     dist_bp: int
@@ -251,7 +254,7 @@ class ReportRow:
 
     def to_tsv(self) -> str:
         """Formats the row data into a tab-separated string."""
-        return f"{self.locus_id}\t{self.target}\t{self.target_identity}\t{self.gene_id}\t{self.context}\t{self.dist_bp}\t{self.topo_hops}\t{self.orientation}\t{self.effect}\t{self.fractional_depth}\n"
+        return f"{self.locus_id}\t{self.target}\t{self.target_identity}\t{self.contig_path}\t{self.gene_id}\t{self.context}\t{self.dist_bp}\t{self.topo_hops}\t{self.orientation}\t{self.effect}\t{self.fractional_depth}\n"
 
 
 class OutputManager:
@@ -329,6 +332,7 @@ class OutputManager:
                 locus_id=locus.id,
                 target=",".join(t.id for t in locus.targets),
                 target_identity=format_identities(locus),
+            contig_path=format_contig_path(locus),
                 gene_id="None",
                 context="NONE",   # Flag it as having no local context
                 dist_bp=-1,
@@ -349,6 +353,7 @@ class OutputManager:
             locus_id=locus.id,
             target=",".join(t.id for t in locus.targets),
             target_identity=format_identities(locus),
+            contig_path=format_contig_path(locus),
             gene_id=relation.feature.id,
             context=relation.spatial.name,
             dist_bp=relation.distance_bp,
@@ -368,13 +373,22 @@ class OutputManager:
         if self.fna_writer:
             self.fna_writer.write_record(genes, contig_id)
 
-    def write_locus_fasta(self, locus_id: str, sequence: str):
-        """Writes a single locus nucleotide sequence to the loci FASTA file."""
+    def write_locus_fasta(self, locus: 'Locus', sequence: str):
+        """Writes a single locus nucleotide sequence to the loci FASTA file, with its contig path in the header."""
         if self.locus_fasta:
-            self.locus_fasta.write(f">{locus_id}\n{sequence}\n")
+            self.locus_fasta.write(f">{locus.id} path={format_contig_path(locus)}\n{sequence}\n")
 
 
 # Functions ------------------------------------------------------------------------------------------------------------
 def format_identities(locus: 'Locus') -> str:
     """Target identities of a locus to 4 decimals, comma-separated in the same order as its targets."""
     return ",".join(f"{t.identity:.4f}" for t in locus.targets)
+
+
+def format_contig_path(locus: 'Locus') -> str:
+    """
+    The contig path of a locus, read in the direction of its first target, e.g. 'ctgA+,ctgB-,ctgC+'.
+
+    A stitched target has one segment per contig on its path; a local locus is its one contig.
+    """
+    return ",".join(f"{s.contig}{'-' if s.strand == Strand.REVERSE else '+'}" for s in locus.targets[0].segments)
