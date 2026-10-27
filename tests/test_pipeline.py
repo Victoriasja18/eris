@@ -5,7 +5,7 @@ from Bio.Seq import Seq
 from eris.alignment import AlignmentBatch
 from eris.constants import Strand
 from eris.graph import Edge, TopologyEngine
-from eris.io import GenomeAssembly
+from eris.io import GenomeAssembly, format_contig_path
 from eris.pipeline import LocusBuilder
 
 
@@ -59,3 +59,18 @@ def test_assemble_pools_identity_of_a_stitched_locus_over_its_real_fragments():
     assert [t.identity for locus in kept for t in locus.targets] == [pytest.approx(0.90)]
 
     assert list(builder.assemble(alignments, min_coverage=0.30, min_identity=0.95)) == []
+
+
+def test_stitched_locus_reports_the_strand_each_contig_is_read_on():
+    # IS1 runs off ctgA, through the unaligned ctgB read backwards ('ctgA+ -> ctgB-'), and into ctgC
+    edges = [Edge("ctgA", Strand.FORWARD, "ctgB", Strand.REVERSE, overlap=0),
+             Edge("ctgB", Strand.REVERSE, "ctgC", Strand.FORWARD, overlap=0)]
+    builder = _builder({"ctgA": 1000, "ctgB": 500, "ctgC": 1000}, edges)
+    alignments = {
+        "ctgA": _batch([("IS1", 2000, 0, 1000, "ctgA", 1000, 0, 1000, 1000, 1000)]),
+        "ctgC": _batch([("IS1", 2000, 1500, 2000, "ctgC", 1000, 0, 500, 500, 500)]),
+    }
+
+    loci = list(builder.assemble(alignments, min_coverage=0.30, min_identity=0.0))
+
+    assert [format_contig_path(locus) for locus in loci] == ["ctgA+,ctgB-,ctgC+"]

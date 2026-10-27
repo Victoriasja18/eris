@@ -332,7 +332,7 @@ class OutputManager:
                 locus_id=locus.id,
                 target=",".join(t.id for t in locus.targets),
                 target_identity=format_identities(locus),
-            contig_path=format_contig_path(locus),
+                contig_path=format_contig_path(locus),
                 gene_id="None",
                 context="NONE",   # Flag it as having no local context
                 dist_bp=-1,
@@ -391,4 +391,4 @@ def format_contig_path(locus: 'Locus') -> str:
 
     A stitched target has one segment per contig on its path; a local locus is its one contig.
     """
-    return ",".join(f"{s.contig}{'-' if s.strand == Strand.REVERSE else '+'}" for s in locus.targets[0].segments)
+    return ",".join(f"{s.contig}{s.strand}" for s in locus.targets[0].segments)
