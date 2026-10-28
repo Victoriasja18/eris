@@ -51,6 +51,14 @@ def test_lookalike_names_not_merged(resolver):
     assert resolver.canonical('IS26_IS6_unknown') == 'IS26_IS6_unknown'
 
 
+def test_group_is_the_same_for_targets_and_truth_copies_whatever_was_seen_first(resolver):
+    resolver.canonical('IS1B_IS1_unknown')
+    # A target name, a numbered truth copy and a synonym all land in one group; a look-alike does not
+    assert resolver.group('IS1A_IS1_unknown') == resolver.group('IS1B_2') == resolver.group('IS1E')
+    assert resolver.group('IS1F_1') != resolver.group('IS1A_1')
+    assert resolver.group('IS26_3') == 'IS26'
+
+
 def test_rename_uses_contig_position_order(resolver):
     # IS1B listed first in the batch, but IS1A sits earlier on the contig, so IS1A names the group
     renamed = resolver.rename(_batch(['IS1B_IS1_unknown', 'IS1A_IS1_unknown', 'IS1F_IS1_unknown'], [5000, 100, 8000]))

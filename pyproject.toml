@@ -38,6 +38,7 @@ Documentation = "https://tomdstanton.github.io/eris/"
 
 [project.scripts]
 eris = "eris.cli:main"
+eris-validate = "eris.benchmark.cli:main"
 
 [build-system]
 requires = ["hatchling", "hatch-vcs"]

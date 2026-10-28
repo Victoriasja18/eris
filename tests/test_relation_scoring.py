@@ -4,9 +4,13 @@ from types import SimpleNamespace
 from Bio.Seq import reverse_complement
 
 from eris.constants import Context, Effect
-from relation_scoring import GenePlacer, Placement, TruthRelation, score_relations
+from eris.benchmark.relations import GenePlacer, Placement, TruthRelation, family_of, score_relations
 
 FAMILIES = {"ISA": "famA", "ISB": "famB"}
+
+
+def FAMILY(name):
+    return family_of(name, FAMILIES)
 
 
 def relation(gene_id, spatial, dist=0, topo=0, effect=Effect.NONE, contig="ctg"):
@@ -19,9 +23,9 @@ def locus(name, passengers=(), up=(), down=()):
                            passengers=list(passengers), upstream_flanks=list(up), downstream_flanks=list(down))
 
 
-def truth(side, tag, start, end, family="famA", strand="+", distance=10, effect="none", partial=False,
+def truth(side, tag, start, end, group="famA", strand="+", distance=10, effect="none", partial=False,
           scored=True):
-    return TruthRelation(family=family, side=side, locus_tag=tag, replicon="chr", start=start, end=end,
+    return TruthRelation(group=group, side=side, locus_tag=tag, replicon="chr", start=start, end=end,
                          strand=strand, partial=partial, pseudo=False, distance_bp=distance,
                          effect=effect if scored else None)
 
@@ -36,7 +40,7 @@ def test_relation_is_found_by_family_side_and_overlapping_gene():
     truths = [truth("upstream", "T1", 1000, 2000), truth("downstream", "T2", 5000, 6000)]
     loci = [locus("ISA", up=[relation("g1", Context.UPSTREAM, 30)], down=[relation("g2", Context.DOWNSTREAM, 40)])]
     # g1 covers half of T1; g2 lies on the other strand of T2
-    score = score_relations(truths, loci, FAMILIES, placed(g1=(1500, 2600), g2=(5000, 6000, "-")))
+    score = score_relations(truths, loci, FAMILY, placed(g1=(1500, 2600), g2=(5000, 6000, "-")))
 
     assert score.found == {("famA", "upstream", "T1")}
     assert score.recall == {"upstream": 1.0, "downstream": 0.0}
@@ -46,7 +50,7 @@ def test_gene_crossing_an_is_end_is_a_flank_on_the_side_it_sticks_out_of():
     truths = [truth("upstream", "T1", 1000, 2000, distance=-20), truth("downstream", "T2", 5000, 6000, distance=-5)]
     loci = [locus("ISA", passengers=[relation("g1", Context.OVERLAPPING_START), relation("g2", Context.OVERLAPPING_END),
                                      relation("tnp", Context.INSIDE)])]
-    score = score_relations(truths, loci, FAMILIES, placed(g1=(1000, 2000), g2=(5000, 6000), tnp=(2000, 5000)))
+    score = score_relations(truths, loci, FAMILY, placed(g1=(1000, 2000), g2=(5000, 6000), tnp=(2000, 5000)))
 
     assert score.recall == {"upstream": 1.0, "downstream": 1.0}
 
@@ -55,7 +59,7 @@ def test_pooled_recall_forgives_a_flank_found_on_the_wrong_side():
     # The gene was found, but eris read the IS on the other strand
     truths = [truth("upstream", "T1", 1000, 2000), truth("downstream", "T2", 5000, 6000)]
     loci = [locus("ISA", down=[relation("g1", Context.DOWNSTREAM)])]
-    score = score_relations(truths, loci, FAMILIES, placed(g1=(1000, 2000)))
+    score = score_relations(truths, loci, FAMILY, placed(g1=(1000, 2000)))
 
     assert score.recall == {"upstream": 0.0, "downstream": 0.0}
     assert score.pooled_recall == 0.5
@@ -64,7 +68,7 @@ def test_pooled_recall_forgives_a_flank_found_on_the_wrong_side():
 def test_flank_of_another_family_does_not_count():
     truths = [truth("upstream", "T1", 1000, 2000)]
     loci = [locus("ISB", up=[relation("g1", Context.UPSTREAM)])]
-    assert score_relations(truths, loci, FAMILIES, placed(g1=(1000, 2000))).found == set()
+    assert score_relations(truths, loci, FAMILY, placed(g1=(1000, 2000))).found == set()
 
 
 def test_precision_scores_the_first_flank_of_each_branch():
@@ -77,7 +81,7 @@ def test_precision_scores_the_first_flank_of_each_branch():
                                 relation("g6", Context.DOWNSTREAM, 3000, topo=2, contig="c3")])
     place = placed(g1=(1000, 2000), g2=(3000, 3500), g3=(7000, 8000), g4=(9000, 9500), g5=(20000, 21000),
                    g6=(30000, 31000))
-    score = score_relations(truths, [local, repeat], FAMILIES, place)
+    score = score_relations(truths, [local, repeat], FAMILY, place)
 
     # First flanks: g1 and g3 are true, g5 is not; g2, g4 and g6 lie further along their branches
     assert score.precision == 2 / 3
@@ -86,11 +90,11 @@ def test_precision_scores_the_first_flank_of_each_branch():
 def test_distance_band_agreement_on_found_relations():
     truths = [truth("upstream", "T1", 1000, 2000, distance=-12),  # overlapping, eris agrees
               truth("downstream", "T2", 5000, 6000, distance=140),  # near; eris says far
-              truth("upstream", "T3", 9000, 9500, family="famB", distance=400)]  # far, eris agrees
+              truth("upstream", "T3", 9000, 9500, group="famB", distance=400)]  # far, eris agrees
     loci = [locus("ISA", passengers=[relation("g1", Context.OVERLAPPING_START)],
                   down=[relation("g2", Context.DOWNSTREAM, 160)]),
             locus("ISB", up=[relation("g3", Context.UPSTREAM, 380)])]
-    score = score_relations(truths, loci, FAMILIES, placed(g1=(1000, 2000), g2=(5000, 6000), g3=(9000, 9500)))
+    score = score_relations(truths, loci, FAMILY, placed(g1=(1000, 2000), g2=(5000, 6000), g3=(9000, 9500)))
 
     assert score.band_agreement == 2 / 3
     # Errors |eris - truth|, with overlaps read as 0 as eris reports them: 0, 20, 20
@@ -100,8 +104,8 @@ def test_distance_band_agreement_on_found_relations():
 def test_disrupted_or_truncated_scores_against_truth_disrupted():
     truths = [truth("upstream", "T1", 1000, 2000, effect="disrupted"),
               truth("downstream", "T2", 5000, 6000, effect="disrupted"),
-              truth("upstream", "T3", 9000, 9500, family="famB", effect="disrupted"),
-              truth("downstream", "T4", 12000, 13000, family="famB", scored=False),  # inside another IS
+              truth("upstream", "T3", 9000, 9500, group="famB", effect="disrupted"),
+              truth("downstream", "T4", 12000, 13000, group="famB", scored=False),  # inside another IS
               truth("upstream", "T5", 20000, 21000)]
     loci = [locus("ISA", passengers=[relation("g1", Context.OVERLAPPING_START, effect=Effect.DISRUPTED)],
                   down=[relation("g2", Context.DOWNSTREAM, 3, effect=Effect.TRUNCATED)]),
@@ -111,7 +115,7 @@ def test_disrupted_or_truncated_scores_against_truth_disrupted():
                   down=[relation("g6", Context.DOWNSTREAM, 40, effect=Effect.UPREGULATED)])]
     place = placed(g1=(1000, 2000), g2=(5000, 6000), g3=(9000, 9500), g4=(12000, 13000), g5=(20000, 21000),
                    g6=(30000, 31000))
-    score = score_relations(truths, loci, FAMILIES, place)
+    score = score_relations(truths, loci, FAMILY, place)
 
     # g1 and g2 are right, g5 is a false call, g3 is missed; g4's effect is not scored
     assert (score.disrupted_precision, score.disrupted_recall) == (2 / 3, 2 / 3)
@@ -125,7 +129,7 @@ def test_misses_found_with_a_larger_hops_budget_are_told_apart():
     # With a larger budget the same locus also reaches g2, the true downstream flank; T3 stays out of reach
     reach = [locus("ISA", up=[relation("g1", Context.UPSTREAM)],
                    down=[relation("short", Context.DOWNSTREAM), relation("g2", Context.DOWNSTREAM, 900)])]
-    score = score_relations(truths, loci, FAMILIES, placed(g1=(1000, 2000), g2=(5000, 6000)), reach_loci=reach)
+    score = score_relations(truths, loci, FAMILY, placed(g1=(1000, 2000), g2=(5000, 6000)), reach_loci=reach)
 
     assert score.miss_causes == {("famA", "downstream", "T2"): "budget", ("famA", "downstream", "T3"): "gene"}
     assert score.unplaceable == ["short"]
@@ -133,15 +137,15 @@ def test_misses_found_with_a_larger_hops_budget_are_told_apart():
 
 def test_nucleotide_check_needs_identity_and_coverage_of_complete_cds():
     truths = [truth("upstream", "T1", 1000, 2000), truth("downstream", "T2", 5000, 6000),
-              truth("upstream", "T3", 9000, 10000, family="famB", partial=True),
-              truth("downstream", "T4", 12000, 13000, family="famB")]
+              truth("upstream", "T3", 9000, 10000, group="famB", partial=True),
+              truth("downstream", "T4", 12000, 13000, group="famB")]
     loci = [locus("ISA", up=[relation("g1", Context.UPSTREAM)], down=[relation("g2", Context.DOWNSTREAM)]),
             locus("ISB", up=[relation("g3", Context.UPSTREAM)], down=[relation("g4", Context.DOWNSTREAM)])]
     place = placed(g1=(1000, 2000, "+", 0.98),  # too many mismatches
                    g2=(5300, 6000),  # covers 70% of the CDS
                    g3=(9400, 10000),  # 60%, but the RefSeq CDS is partial
                    g4=(12000, 13000, "+", 0.995))
-    score = score_relations(truths, loci, FAMILIES, place)
+    score = score_relations(truths, loci, FAMILY, place)
 
     assert score.found == {t.key for t in truths}
     assert score.nucleotide_mismatches == {("famA", "upstream", "T1"), ("famA", "downstream", "T2")}

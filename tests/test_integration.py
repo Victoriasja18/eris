@@ -5,7 +5,7 @@ from pathlib import Path
 from eris.io import GenomeAssembly, TargetDatabase
 from eris.pipeline import Pipeline
 from eris.constants import FeatureType
-from relation_scoring import GenePlacer, read_truth, report, score_relations
+from eris.benchmark.relations import GenePlacer, family_of, read_truth, report, score_relations
 
 DATA_DIR = Path("data")
 
@@ -239,7 +239,7 @@ def test_find_overlapping_claims_flags_leftover_half_of_stitched_locus():
 
 # Relation benchmark -------------------------------------------------------------------------------------------------
 # Scores how eris relates each IS to its flanks against the curated EC958 truth, built by
-# scripts/build_relation_truth.py. See docs/adr/0002-relation-benchmark-truth.md and tests/relation_scoring.py.
+# scripts/build_relation_truth.py. See docs/adr/0002-relation-benchmark-truth.md and src/eris/benchmark/relations.py.
 RELATION_TRUTH = DATA_DIR / "ec958_IS_cds_relations.tsv"
 REFERENCE = DATA_DIR / "EC958_complete_genome.fasta"
 needs_relation_data = pytest.mark.skipif(
@@ -370,8 +370,11 @@ def relation_benchmark(request, target_db, families, placer):
             placements[gene_id] = placer.place(genes.by_id[gene_id])
         return placements[gene_id]
 
-    truths = read_truth(RELATION_TRUTH, families, replicons)
-    score = score_relations(truths, runs[RELATION_HOPS], families, place, reach_loci=runs[REACH_HOPS])
+    def family(name):
+        return family_of(name, families)
+
+    truths = read_truth(RELATION_TRUTH, family, replicons)
+    score = score_relations(truths, runs[RELATION_HOPS], family, place, reach_loci=runs[REACH_HOPS])
     print(f"\n{request.param}:\n{report(score)}")
     return request.param, score
 

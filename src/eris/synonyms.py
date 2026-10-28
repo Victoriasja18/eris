@@ -113,6 +113,13 @@ class SynonymResolver:
                         if (other := other.strip()) and other.upper() != 'NA':
                             self._uf.union(name, other)
 
+    def group(self, name: str) -> str:
+        """
+        A fixed name for the synonym group of a target or truth IS name (e.g. 'IS1A_IS1_unknown' or 'IS1A_2'),
+        the same for every member and every run with the same table, unlike `canonical`.
+        """
+        return self._uf.find(name.split('_')[0])
+
     def canonical(self, target_name: str) -> str:
         """Returns the first-seen target name of this name's synonym group (registering it if new)."""
         root = self._uf.find(target_name.split('_')[0])
