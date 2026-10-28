@@ -36,6 +36,18 @@ def test_contig_path_of_a_local_locus_is_its_contig_on_the_target_strand():
     assert format_contig_path(_locus("locus_1", ("ctg5", 100, 1100, Strand.REVERSE))) == "ctg5-"
 
 
+def test_cds_fasta_names_each_gene_by_the_report_gene_id(tmp_path):
+    # pyfgs coordinates are 0-based and half-open; a frameshift-corrected call is longer than end - start
+    genes = [SimpleNamespace(start=10, end=19, strand=1, sequence=lambda: b"ATGAAATAA"),
+             SimpleNamespace(start=30, end=39, strand=-1, sequence=lambda: b"ATGAAACTAA")]
+    prefix = str(tmp_path / "out")
+    with OutputManager(prefix, write_gff=False, write_faa=False, write_fna=True) as out:
+        out.write_global_genes("ctg_1", "", genes)
+
+    assert (tmp_path / "out_cds.fna").read_text() == (">ctg_1_10_19 strand=+\nATGAAATAA\n"
+                                                      ">ctg_1_30_39 strand=-\nATGAAACTAA\n")
+
+
 def test_report_and_locus_fasta_carry_the_contig_path(tmp_path):
     locus = _locus("locus_split_1", ("ctgA", 900, 1000, Strand.FORWARD), ("ctgB", 0, 500, Strand.REVERSE))
     prefix = str(tmp_path / "out")

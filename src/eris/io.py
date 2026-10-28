@@ -17,7 +17,7 @@ from Bio.SeqRecord import SeqRecord
 
 from mappy import Aligner
 
-from pyfgs import FaaWriter, FnaWriter, Gff3Writer
+from pyfgs import FaaWriter, Gff3Writer
 
 from eris.alignment import Cigar
 from eris.graph import Edge
@@ -315,7 +315,8 @@ class OutputManager:
             self.faa_writer = self._stack.enter_context(FaaWriter(f"{self.prefix}_proteins.faa"))
 
         if self.prefix and self.write_fna:
-            self.fna_writer = self._stack.enter_context(FnaWriter(f"{self.prefix}_cds.fna"))
+            # Written here rather than by pyfgs, so each record is named by the report's gene_id
+            self.fna_writer = self._stack.enter_context(open(f"{self.prefix}_cds.fna", "w"))
 
         # 3. Setup Locus FASTA writer
         self.locus_fasta = None
@@ -372,13 +373,15 @@ class OutputManager:
         self.tsv_handle.write(row.to_tsv())
 
     def write_global_genes(self, contig_id: str, sequence: Union[str, bytes], genes: list['Gene']):
-        """Writes assembly-wide gene calls to the GFF3 and FAA files."""
+        """Writes assembly-wide gene calls to the GFF3, FAA and FNA files."""
         if self.gff_writer:
             self.gff_writer.write_record(genes, contig_id, sequence)
         if self.faa_writer:
             self.faa_writer.write_record(genes, contig_id)
         if self.fna_writer:
-            self.fna_writer.write_record(genes, contig_id)
+            for g in genes:
+                self.fna_writer.write(f">{gene_id(contig_id, g)} strand={Strand(g.strand)}\n"
+                                      f"{g.sequence().decode()}\n")
 
     def write_locus_fasta(self, locus: 'Locus', sequence: str):
         """Writes a single locus nucleotide sequence to the loci FASTA file, with its contig path in the header."""
@@ -390,6 +393,15 @@ class OutputManager:
 def format_identities(locus: 'Locus') -> str:
     """Target identities of a locus to 4 decimals, comma-separated in the same order as its targets."""
     return ",".join(f"{t.identity:.4f}" for t in locus.targets)
+
+
+def gene_id(contig_id: str, gene: 'Gene') -> str:
+    """
+    The id of a gene call in the report and in _cds.fna: '<contig>_<start>_<end>', 0-based and half-open like the
+    report's coordinates. The CDS sequence can be a base or two longer or shorter than end - start, where pyfgs
+    corrected a frameshift.
+    """
+    return f"{contig_id}_{gene.start}_{gene.end}"
 
 
 def format_contig_path(locus: 'Locus') -> str:

@@ -71,6 +71,7 @@ Depending on the arguments provided, eris will output:
 2. **`{prefix}_loci.fasta`**: The nucleotide sequence of each locus, with its contig path in the header. A local locus is its slice of the contig, on the contig's forward strand; a stitched locus is its target's extent read along the contig path, each contig on the strand it is read on and each edge overlap counted once.
 3. **`{prefix}_assembly.gff`**: GFF3 annotation of the global features.
 4. **`{prefix}_proteins.faa`**: Amino acid fasta of the global features.
+5. **`{prefix}_cds.fna`**: Nucleotide fasta of the global features, each named by the report's `gene_id` (`<contig>_<start>_<end>`, 0-based like the report's coordinates), e.g. `>HG941718.1_3334642_3335068 strand=+`. A frameshift-corrected gene can be a base or two longer or shorter than `end - start`.
 
 ## 📚 Documentation
 
