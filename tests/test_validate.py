@@ -71,16 +71,16 @@ def test_report_rows_become_flanks_nearest_first_and_passengers_crossing_an_end_
 
 
 def test_cds_sequences_are_filed_under_the_report_gene_id(tmp_path):
+    # eris names each record by the report's 0-based gene id; a frameshift-corrected call is longer than its coordinates
     path = tmp_path / 'r_cds.fna'
-    # pyfgs's 1-based header, one with a frameshift correction (a base longer than its coordinates), and a 0-based one
-    path.write_text('>ctg_FGS_1 ctg:11-19 strand=+\nATGAAATAA\n'
-                    '>ctg_FGS_2 ctg:31-39 strand=-\nATGAAACTAA\n'
-                    '>other_x_FGS_1 other_x:50-59 strand=+\nATGCCCGTAA\n')
-    sequences = read_cds_sequences(path)
+    path.write_text('>my_ctg_9_10_19 strand=+\nATGAAATAA\n>my_ctg_9_30_39 strand=-\nATGAAACTAA\n')
+    assert read_cds_sequences(path) == {'my_ctg_9_10_19': b'ATGAAATAA', 'my_ctg_9_30_39': b'ATGAAACTAA'}
 
-    assert sequences['ctg_10_19'] == b'ATGAAATAA'
-    assert sequences['ctg_30_39'] == b'ATGAAACTAA'
-    assert sequences['other_x_50_59'] == b'ATGCCCGTAA'
+
+def test_cds_sequences_of_an_older_pyfgs_file_are_read_from_its_1_based_location(tmp_path):
+    path = tmp_path / 'r_cds.fna'
+    path.write_text('>ctg_FGS_1 ctg:11-19 strand=+\nATGAAATAA\n>ctg_FGS_2 ctg:31-39 strand=-\nATGAAACTAA\n')
+    assert read_cds_sequences(path) == {'ctg_10_19': b'ATGAAATAA', 'ctg_30_39': b'ATGAAACTAA'}
 
 
 def test_a_flank_on_the_wrong_side_counts_against_both_sides():
@@ -135,8 +135,8 @@ def test_eris_validate_writes_the_tables_from_eris_output_files(tmp_path):
         truth_row('IS1A_1', 'upstream', 'UP', 2000, 2900, distance=100),
         truth_row('IS1A_1', 'downstream', 'DOWN', 4020, 5000, strand='-', distance=20)])
     # eris called the IS IS1B (a synonym) on contig 'c_1', which holds chr[1000:6000]
-    (tmp_path / 'r_cds.fna').write_text(f'>c_1_FGS_1 c_1:1001-1900 strand=+\n{chrom[2000:2900]}\n'
-                                        f'>c_1_FGS_2 c_1:3021-4000 strand=-\n{reverse_complement(chrom[4020:5000])}\n')
+    (tmp_path / 'r_cds.fna').write_text(f'>c_1_1000_1900 strand=+\n{chrom[2000:2900]}\n'
+                                        f'>c_1_3020_4000 strand=-\n{reverse_complement(chrom[4020:5000])}\n')
     write_tsv(tmp_path / 'r_report.tsv', REPORT_COLUMNS, [
         report_row('L1', 'IS1B_IS1_unknown', 'c_1_1000_1900', 'UPSTREAM', dist=100),
         report_row('L1', 'IS1B_IS1_unknown', 'c_1_3020_4000', 'DOWNSTREAM', dist=20)])
@@ -160,7 +160,7 @@ def test_eris_validate_stops_when_the_report_and_cds_file_are_from_different_run
     (tmp_path / 'ref.fasta').write_text('>chr\nACGT\n')
     (tmp_path / 'IS.csv').write_text('N°,Name,Family,Group,Synomyns,Iso,Origin\n')
     write_tsv(tmp_path / 'truth.tsv', TRUTH_COLUMNS, [])
-    (tmp_path / 'r_cds.fna').write_text('>c_FGS_1 c:1-9 strand=+\nATGAAATAA\n')
+    (tmp_path / 'r_cds.fna').write_text('>c_0_9 strand=+\nATGAAATAA\n')
     write_tsv(tmp_path / 'r_report.tsv', REPORT_COLUMNS, [report_row('L1', 'IS1B_IS1_unknown', 'c_50_80', 'UPSTREAM')])
 
     with pytest.raises(SystemExit):

@@ -250,23 +250,23 @@ def read_report_flanks(path: Path, group_of: Callable[[str], str]) -> list[list[
     return list(loci.values())
 
 
-# pyfgs writes '<contig>:<start>-<end>' in each header's description, 1-based; some eris builds rewrite it 0-based
-_FNA_LOCATION = re.compile(r'(\S+):(\d+)-(\d+)')
+# Files written by pyfgs's FnaWriter (eris before records were named by gene_id) carry '<contig>:<start>-<end>',
+# 1-based, in each header's description
+_PYFGS_LOCATION = re.compile(r'(\S+):(\d+)-(\d+)')
 
 
 def read_cds_sequences(path: Path) -> dict[str, bytes]:
     """
     The coding sequence of every gene in an eris `_cds.fna`, by the gene id the report uses ('<contig>_<start>_<end>',
-    0-based). The sequence length cannot tell the two header styles apart (a frameshifted call is a base or two longer
-    than its coordinates), so each gene is filed under the 1-based reading and, where no gene has that id, the 0-based.
+    0-based). eris names each record by that id; an older file written by pyfgs is read from its 1-based location.
     """
-    one_based, zero_based = {}, {}
+    sequences = {}
     for record in SeqIO.parse(path, 'fasta'):
-        if not (m := _FNA_LOCATION.search(record.description)):
-            raise ValueError(f"{path}: no '<contig>:<start>-<end>' in the header of {record.id}")
-        contig, start, end = m.group(1), int(m.group(2)), int(m.group(3))
-        one_based[f"{contig}_{start - 1}_{end}"] = zero_based[f"{contig}_{start}_{end}"] = bytes(record.seq)
-    return zero_based | one_based
+        if m := _PYFGS_LOCATION.search(record.description):
+            sequences[f"{m.group(1)}_{int(m.group(2)) - 1}_{m.group(3)}"] = bytes(record.seq)
+        else:
+            sequences[record.id] = bytes(record.seq)
+    return sequences
 
 
 def band(distance: int, overlapping: bool = False) -> str:

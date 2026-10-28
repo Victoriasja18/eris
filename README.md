@@ -73,6 +73,20 @@ Depending on the arguments provided, eris will output:
 3. **`{prefix}_assembly.gff`**: GFF3 annotation of the global features.
 4. **`{prefix}_proteins.faa`**: Amino acid fasta of the global features.
 
+### Validating relations
+`eris-validate` scores a run's upstream/downstream CDS, distances and effects against a curated relation truth (one row per IS flank, as `scripts/build_relation_truth.py` writes for EC958). It reads only eris's output files, so any run can be scored again later:
+
+```bash
+eris-validate --report run_report.tsv --cds run_cds.fna --reference EC958_complete_genome.fasta \
+    --truth ec958_IS_cds_relations.tsv -o validation/ [--reach-report run_hops20_report.tsv] [--replicons HG941718.1]
+```
+
+IS names match through ISfinder synonym groups (`--synonyms IS.csv`, downloaded if not given). A gene matches a truth CDS when it lies on the same replicon and strand and overlaps it by at least half of the shorter of the two. Precision is over eris's nearest flank per side per graph branch, and a flank reported on the wrong side counts against both sides. It writes:
+
+1. **`metrics.tsv`**: precision, recall and F1 per side for relations and for disrupted calls, and distance agreement, in long format (`dimension`, `side`, `replicon`, `metric`, `value`).
+2. **`relations.tsv`**: one row per truth relation (`TP`, `FN`, `FN_wrong_side`) and per false flank (`FP`, `FP_wrong_side`), with both distances and effects, a sequence check, and the cause of each miss (`budget` when `--reach-report` finds it).
+3. **`side_confusion.tsv`**, **`distance_confusion.tsv`**, **`effect_confusion.tsv`**: truth against eris for the side, the distance band (overlapping, near ≤ 150 bp, far) and the effect.
+
 ## 📚 Documentation
 
 For detailed guides, API reference, and advanced configuration, visit the [eris Documentation](https://tomdstanton.github.io/eris/).
