@@ -289,6 +289,80 @@ def test_resolve_does_not_stitch_fragments_on_one_contig(mode):
     assert len(cleaned["chr"]) == 2
 
 
+def _stitched_paths(mode, contigs, edges, rows):
+    """The contig names of each path stitched from rows (see _fragments) on contigs of {name: length}."""
+    engine = TopologyEngine(edges, contigs, {c: 10.0 for c in contigs}, mode=mode)
+    return [[f.t_name for f in p] for p in engine.resolve_split_alignments(_fragments(rows, contigs))[1]]
+
+
+@pytest.mark.parametrize("mode", ["variant", "collapse"])
+@pytest.mark.parametrize("a_strand, a_start, a_end, stitched", [
+    # Read forward, the path leaves ctgA by its end: a fragment at its start leaves 4.6 kb of ctgA uncounted
+    (Strand.FORWARD, 0, 400, False),
+    (Strand.FORWARD, 4600, 5000, True),
+    # Read backwards, the path leaves ctgA by its start
+    (Strand.REVERSE, 4600, 5000, False),
+    (Strand.REVERSE, 0, 400, True),
+])
+def test_resolve_stitches_only_a_fragment_hanging_off_the_contig_end_the_path_leaves_by(
+        mode, a_strand, a_start, a_end, stitched):
+    paths = _stitched_paths(mode, {"ctgA": 5000, "ctgB": 5000}, [Edge("ctgA", a_strand, "ctgB", Strand.FORWARD)], [
+        ("IS1", 1000, 0, 400, "ctgA", a_start, a_end, a_strand),
+        ("IS1", 1000, 400, 1000, "ctgB", 0, 600, Strand.FORWARD),
+    ])
+
+    assert paths == ([["ctgA", "ctgB"]] if stitched else [])
+
+
+@pytest.mark.parametrize("mode", ["variant", "collapse"])
+@pytest.mark.parametrize("b_strand, b_start, b_end, stitched", [
+    # Read forward, the path enters ctgB by its start; read backwards, by its end
+    (Strand.FORWARD, 4400, 5000, False),
+    (Strand.FORWARD, 0, 600, True),
+    (Strand.REVERSE, 0, 600, False),
+    (Strand.REVERSE, 4400, 5000, True),
+])
+def test_resolve_stitches_only_a_fragment_hanging_off_the_contig_end_the_path_enters_by(
+        mode, b_strand, b_start, b_end, stitched):
+    paths = _stitched_paths(mode, {"ctgA": 5000, "ctgB": 5000}, [Edge("ctgA", Strand.FORWARD, "ctgB", b_strand)], [
+        ("IS1", 1000, 0, 400, "ctgA", 4600, 5000, Strand.FORWARD),
+        ("IS1", 1000, 400, 1000, "ctgB", b_start, b_end, b_strand),
+    ])
+
+    assert paths == ([["ctgA", "ctgB"]] if stitched else [])
+
+
+@pytest.mark.parametrize("mode", ["variant", "collapse"])
+def test_resolve_allows_a_fragment_to_stop_short_of_the_contig_end_by_the_link_overlap_and_slack(mode):
+    # 111 bp overlap + 50 bp slack: a fragment ending 161 bp from ctgA's end hangs off it, 162 bp does not
+    def stitched(gap):
+        return _stitched_paths(mode, {"ctgA": 5000, "ctgB": 5000},
+                               [Edge("ctgA", Strand.FORWARD, "ctgB", Strand.FORWARD, overlap=111)], [
+            ("IS1", 1000, 0, 400, "ctgA", 4600 - gap, 5000 - gap, Strand.FORWARD),
+            ("IS1", 1000, 289, 1000, "ctgB", 0, 711, Strand.FORWARD),
+        ])
+
+    assert stitched(161) and not stitched(162)
+
+
+@pytest.mark.parametrize("mode", ["variant", "collapse"])
+@pytest.mark.parametrize("mid_end, chain", [
+    # A fragment in the middle of a chain is entered and left, so must cover its contig: one covering only ctgM's
+    # start ends the chain there, as ctgM's other 1.7 kb would otherwise land inside the locus uncounted
+    (300, ["ctgA", "ctgM"]),
+    (2000, ["ctgA", "ctgM", "ctgB"]),
+])
+def test_resolve_chains_through_a_middle_fragment_only_if_it_covers_its_contig(mode, mid_end, chain):
+    contigs = {"ctgA": 5000, "ctgM": 2000, "ctgB": 5000}
+    edges = [Edge("ctgA", Strand.FORWARD, "ctgM", Strand.FORWARD), Edge("ctgM", Strand.FORWARD, "ctgB", Strand.FORWARD)]
+    paths = _stitched_paths(mode, contigs, edges, [
+        ("IS1", 3000, 0, 500, "ctgA", 4500, 5000, Strand.FORWARD),
+        ("IS1", 3000, 500, 500 + mid_end, "ctgM", 0, mid_end, Strand.FORWARD),
+        ("IS1", 3000, 500 + mid_end, 3000, "ctgB", 0, 2500 - mid_end, Strand.FORWARD),
+    ])
+
+    assert paths == [chain]
+
 def test_neighbours_come_back_in_the_order_their_links_were_read():
     # Set order depends on the string hash seed, which made flanks change between runs on the same assembly
     edges = [Edge("hub", Strand.FORWARD, f"ctg{i}", Strand.FORWARD) for i in range(10)]

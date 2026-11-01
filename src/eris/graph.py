@@ -179,6 +179,8 @@ class TopologyEngine:
                 if rec.is_partial:
                     partial_alns[rec.q_name].append(rec)
 
+        slack = self._max_overlap + 50
+
         resolved_paths = []
         used_records = set()  # Tracks (t_name, idx) of fragments successfully stitched
 
@@ -214,12 +216,17 @@ class TopologyEngine:
 
                         # Fragments must be sequentially downstream on the query; adjacent contigs share
                         # their edge overlap, so their fragments may overlap on the query by that much
-                        if expected_gap < -(self._max_overlap + 50):
+                        if expected_gap < -slack:
                             continue
 
                         # Stitching joins contigs; two fragments on one contig at the right spacing are the inverted
                         # repeats of a cross-mapping relative, and the graph search would call them adjacent
                         if next_frag.t_name == curr_frag.t_name:
+                            continue
+
+                        # The contig path's length counts neither end contig, so each fragment must run off the end
+                        # the path crosses, give or take the overlap; else the rest of its contig lands in the locus
+                        if not (curr_frag.hangs_3p(slack) and next_frag.hangs_5p(slack)):
                             continue
 
                         # Ask the graph if these two fragments physically connect
