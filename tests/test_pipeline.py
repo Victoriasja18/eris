@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 import numpy as np
 from Bio.Seq import Seq
@@ -5,6 +7,7 @@ from Bio.Seq import Seq
 from eris.alignment import AlignmentBatch
 from eris.constants import FeatureType, Strand
 from eris.graph import Edge, TopologyEngine
+from eris.interval import IntervalBatch
 from eris.io import GenomeAssembly, format_contig_path
 from eris.pipeline import LocusBuilder, Locus, GenomicFeature, LocationSegment
 
@@ -25,11 +28,11 @@ def _batch(rows):
     )
 
 
-def _builder(lengths, edges=(), mode='variant', depths=None):
+def _builder(lengths, edges=(), mode='variant', depths=None, intervals=None, max_feature_hops=0, **builder_args):
     depths = depths if depths is not None else {c: 10.0 for c in lengths}
     genome = GenomeAssembly("test", {c: Seq("A" * n) for c, n in lengths.items()}, list(edges), depths, lengths)
-    engine = TopologyEngine(list(edges), lengths, depths, mode=mode)
-    return LocusBuilder(engine, genome, max_feature_hops=0)
+    engine = TopologyEngine(list(edges), lengths, depths, features=intervals, mode=mode)
+    return LocusBuilder(engine, genome, max_feature_hops=max_feature_hops, **builder_args)
 
 
 def test_assemble_drops_local_alignments_below_min_identity():
@@ -169,3 +172,52 @@ def test_local_sequence_is_its_slice_of_the_contig():
     locus = _path_locus(("ctgA", 2, 8, Strand.REVERSE))
 
     assert locus.extract_sequence(genome) == "AACCCG"
+
+
+def _flank_builder(lengths, edges, gene_spans):
+    """gene_spans: contig -> (start, end) of its one gene, read on '+'; flanks are searched one gene deep."""
+    intervals = {c: IntervalBatch(np.array([s]), np.array([e]), np.array([Strand.FORWARD], dtype=np.int8))
+                 for c, (s, e) in gene_spans.items()}
+    features = {c: [GenomicFeature(f"gene_{c}", FeatureType.CDS, [LocationSegment(c, s, e, Strand.FORWARD)])]
+                for c, (s, e) in gene_spans.items()}
+    no_indels = {c: [SimpleNamespace(insertions=[], deletions=[])] for c in gene_spans}
+    return _builder(lengths, edges, intervals=intervals, max_feature_hops=1, features=features, genes=no_indels)
+
+
+def test_downstream_flank_across_a_link_counts_the_overlap_once():
+    # 'ctgA+ -> ctgB+' share 100 bp, so ctgB starts at ctgA's 900 and its gene at 300 sits at 1200 in the joined sequence
+    builder = _flank_builder({"ctgA": 1000, "ctgB": 1000},
+                             [Edge("ctgA", Strand.FORWARD, "ctgB", Strand.FORWARD, overlap=100)],
+                             {"ctgB": (300, 600)})
+    alignments = {"ctgA": _batch([("IS1", 200, 0, 200, "ctgA", 1000, 800, 1000, 200, 200)])}
+
+    [locus] = builder.assemble(alignments)
+
+    assert [f.distance_bp for f in locus.downstream_flanks] == [200]
+
+
+def test_upstream_flank_across_a_link_entered_backwards_counts_the_overlap_once():
+    # 'ctgB+ -> ctgA+' share 100 bp; walking upstream leaves ctgA by its start and reads ctgB on '-'. ctgA starts at
+    # ctgB's 900, so the gene ending at 600 on ctgB is 300 bp before the locus at ctgA's start
+    builder = _flank_builder({"ctgA": 1000, "ctgB": 1000},
+                             [Edge("ctgB", Strand.FORWARD, "ctgA", Strand.FORWARD, overlap=100)],
+                             {"ctgB": (300, 600)})
+    alignments = {"ctgA": _batch([("IS1", 200, 0, 200, "ctgA", 1000, 0, 200, 200, 200)])}
+
+    [locus] = builder.assemble(alignments)
+
+    assert [f.distance_bp for f in locus.upstream_flanks] == [300]
+
+
+def test_flank_two_links_away_counts_each_overlap_once():
+    # 'ctgA+ -> ctgB+ -> ctgC+' share 100 and 50 bp; ctgB carries no gene. ctgB starts at ctgA's 900 and ctgC at
+    # 900 + 500 - 50 = 1350, so ctgC's gene at 200 sits at 1550, 550 bp past the locus end
+    builder = _flank_builder({"ctgA": 1000, "ctgB": 500, "ctgC": 1000},
+                             [Edge("ctgA", Strand.FORWARD, "ctgB", Strand.FORWARD, overlap=100),
+                              Edge("ctgB", Strand.FORWARD, "ctgC", Strand.FORWARD, overlap=50)],
+                             {"ctgC": (200, 400)})
+    alignments = {"ctgA": _batch([("IS1", 200, 0, 200, "ctgA", 1000, 800, 1000, 200, 200)])}
+
+    [locus] = builder.assemble(alignments)
+
+    assert [(f.distance_bp, f.topological_dist) for f in locus.downstream_flanks] == [(550, 2)]
