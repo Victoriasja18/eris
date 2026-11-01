@@ -129,15 +129,15 @@ class AlignmentRecord:
         """True if the alignment covers less than 90% of the query sequence."""
         return self.length < (self.q_length * 0.9)
 
-    @property
-    def hangs_5p(self) -> bool:
-        """True if the alignment starts within 15bp of the target start."""
-        return self.t_start <= 15
+    def hangs_5p(self, tolerance: int) -> bool:
+        """True if the query enters the target within tolerance bp of the target end it is read from."""
+        gap = self.t_start if self.strand == Strand.FORWARD else self.t_length - self.t_end
+        return gap <= tolerance
 
-    @property
-    def hangs_3p(self) -> bool:
-        """True if the alignment ends within 15bp of the target end."""
-        return (self.t_length - self.t_end) <= 15
+    def hangs_3p(self, tolerance: int) -> bool:
+        """True if the query leaves the target within tolerance bp of the target end it is read towards."""
+        gap = self.t_length - self.t_end if self.strand == Strand.FORWARD else self.t_start
+        return gap <= tolerance
 
 
 @dataclass(frozen=True, slots=True)
