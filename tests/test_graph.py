@@ -289,9 +289,9 @@ def test_resolve_does_not_stitch_fragments_on_one_contig(mode):
     assert len(cleaned["chr"]) == 2
 
 
-def _stitched_paths(mode, contigs, edges, rows):
+def _stitched_paths(mode, contigs, edges, rows, depths=None):
     """The contig names of each path stitched from rows (see _fragments) on contigs of {name: length}."""
-    engine = TopologyEngine(edges, contigs, {c: 10.0 for c in contigs}, mode=mode)
+    engine = TopologyEngine(edges, contigs, depths or {c: 10.0 for c in contigs}, mode=mode)
     return [[f.t_name for f in p] for p in engine.resolve_split_alignments(_fragments(rows, contigs))[1]]
 
 
@@ -362,6 +362,79 @@ def test_resolve_chains_through_a_middle_fragment_only_if_it_covers_its_contig(m
     ])
 
     assert paths == [chain]
+
+
+def _mixed_overlap_graph():
+    """ctgA+ -> ctgB+ overlap by 20 bp; elsewhere in the graph ctgC+ -> ctgD+ overlap by 200 bp."""
+    contigs = {"ctgA": 5000, "ctgB": 5000, "ctgC": 5000, "ctgD": 5000}
+    edges = [Edge("ctgA", Strand.FORWARD, "ctgB", Strand.FORWARD, overlap=20),
+             Edge("ctgC", Strand.FORWARD, "ctgD", Strand.FORWARD, overlap=200)]
+    return contigs, edges
+
+
+@pytest.mark.parametrize("mode", ["variant", "collapse"])
+@pytest.mark.parametrize("query_overlap, stitched", [(70, True), (71, False)])
+def test_resolve_lets_fragments_overlap_on_the_query_by_the_crossed_link_overlap_not_the_graph_largest(
+        mode, query_overlap, stitched):
+    # ctgA and ctgB share 20 bp, so their fragments may overlap on the IS by 20 + 50 bp; the 200 bp link elsewhere
+    # would allow 250
+    contigs, edges = _mixed_overlap_graph()
+    paths = _stitched_paths(mode, contigs, edges, [
+        ("IS1", 1000, 0, 400, "ctgA", 4600, 5000, Strand.FORWARD),
+        ("IS1", 1000, 400 - query_overlap, 1000, "ctgB", 0, 600 + query_overlap, Strand.FORWARD),
+    ])
+
+    assert paths == ([["ctgA", "ctgB"]] if stitched else [])
+
+
+@pytest.mark.parametrize("mode", ["variant", "collapse"])
+@pytest.mark.parametrize("a_gap, b_gap, stitched", [
+    (70, 0, True), (71, 0, False),  # ctgA's fragment stops short of the end the path leaves by
+    (0, 70, True), (0, 71, False),  # ctgB's fragment starts in from the end the path enters by
+])
+def test_resolve_lets_a_fragment_stop_short_of_its_contig_end_by_the_crossed_link_overlap_not_the_graph_largest(
+        mode, a_gap, b_gap, stitched):
+    contigs, edges = _mixed_overlap_graph()
+    paths = _stitched_paths(mode, contigs, edges, [
+        ("IS1", 1000, 0, 400, "ctgA", 4600 - a_gap, 5000 - a_gap, Strand.FORWARD),
+        ("IS1", 1000, 380, 1000, "ctgB", b_gap, 620 + b_gap, Strand.FORWARD),
+    ])
+
+    assert paths == ([["ctgA", "ctgB"]] if stitched else [])
+
+
+def test_collapse_mode_backs_up_past_a_deeper_path_whose_links_reject_the_fragments():
+    # Both routes from ctgA to ctgB fit the length; the deeper one, through ctgX, ends in a 20 bp link that ctgB's
+    # fragment (starting 100 bp in) does not reach, while the shallower one, through ctgY, ends in a 200 bp link
+    contigs = {"ctgA": 5000, "ctgX": 500, "ctgY": 680, "ctgB": 5000}
+    edges = [Edge("ctgA", Strand.FORWARD, "ctgX", Strand.FORWARD, overlap=20),
+             Edge("ctgX", Strand.FORWARD, "ctgB", Strand.FORWARD, overlap=20),
+             Edge("ctgA", Strand.FORWARD, "ctgY", Strand.FORWARD, overlap=20),
+             Edge("ctgY", Strand.FORWARD, "ctgB", Strand.FORWARD, overlap=200)]
+    paths = _stitched_paths('collapse', contigs, edges, [
+        ("IS1", 2000, 0, 500, "ctgA", 4500, 5000, Strand.FORWARD),
+        ("IS1", 2000, 1000, 2000, "ctgB", 100, 1100, Strand.FORWARD),
+    ], depths={"ctgA": 10.0, "ctgX": 20.0, "ctgY": 15.0, "ctgB": 10.0})
+
+    assert paths == [["ctgA", "ctgY", "ctgB"]]
+
+
+@pytest.mark.parametrize("mode", ["variant", "collapse"])
+@pytest.mark.parametrize("query_overlap, stitched", [(122, True), (123, False)])
+def test_resolve_lets_fragments_overlap_on_the_query_by_as_much_as_the_contig_path_overlaps_itself(
+        mode, query_overlap, stitched):
+    # ctgM (150 bp) shares 111 bp with ctgA and with ctgB, so ctgA's end and ctgB's start overlap by 72 bp: the
+    # fragments may overlap on the IS by 72 + 50 bp, short of the 111 + 50 either link alone would allow
+    contigs = {"ctgA": 5000, "ctgM": 150, "ctgB": 5000}
+    edges = [Edge("ctgA", Strand.FORWARD, "ctgM", Strand.FORWARD, overlap=111),
+             Edge("ctgM", Strand.FORWARD, "ctgB", Strand.FORWARD, overlap=111)]
+    paths = _stitched_paths(mode, contigs, edges, [
+        ("IS1", 1000, 0, 400, "ctgA", 4600, 5000, Strand.FORWARD),
+        ("IS1", 1000, 400 - query_overlap, 1000, "ctgB", 0, 600 + query_overlap, Strand.FORWARD),
+    ])
+
+    assert paths == ([["ctgA", "ctgM", "ctgB"]] if stitched else [])
+
 
 def test_neighbours_come_back_in_the_order_their_links_were_read():
     # Set order depends on the string hash seed, which made flanks change between runs on the same assembly

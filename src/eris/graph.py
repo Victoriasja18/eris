@@ -1,10 +1,13 @@
-from typing import NamedTuple, Iterable, KeysView
+from typing import NamedTuple, Iterable, KeysView, Callable
 from collections import defaultdict
+from functools import partial
 
 import numpy as np
 
 from eris.interval import Strand, IntervalBatch
 from eris.alignment import AlignmentBatch, AlignmentRecord
+
+OVERLAP_SLACK = 50  # bp a fragment may stop short of, or overlap, a link beyond the link's own overlap
 
 
 # Classes --------------------------------------------------------------------------------------------------------------
@@ -129,8 +132,7 @@ class TopologyEngine:
     It provides tools for "stitching" together partial alignments that span
     multiple contigs by finding valid physical paths through the graph.
     """
-    __slots__ = ('_graph', 'contig_lengths', 'contig_depths', 'features', '_visited_nodes', 'mode',
-                 '_max_overlap')
+    __slots__ = ('_graph', 'contig_lengths', 'contig_depths', 'features', '_visited_nodes', 'mode', '_end_overlap')
 
     def __init__(self, edges: Iterable[Edge], contig_lengths: dict[str, int], contig_depths: dict[str, float],
                  features: dict[str, IntervalBatch] = None, mode: str = 'variant'):
@@ -146,7 +148,11 @@ class TopologyEngine:
         # A GFA link is written once but holds on both strands, so add its complement for walking the other way
         edges = list(edges)
         self._graph = Graph(edges + [e.complement() for e in edges])
-        self._max_overlap: int = max((e.overlap for e in edges), default=0)
+        # The largest overlap of any link leaving each contig on each strand, and of any arriving at it
+        self._end_overlap: dict[tuple[str, Strand, bool], int] = defaultdict(int)
+        for e in edges + [e.complement() for e in edges]:
+            for key in ((e.u, e.u_strand, True), (e.v, e.v_strand, False)):
+                self._end_overlap[key] = max(self._end_overlap[key], e.overlap)
         self.contig_lengths: dict[str, int] = contig_lengths
         self.contig_depths: dict[str, float] = contig_depths
         self.features: dict[str, IntervalBatch] = features or {}
@@ -179,8 +185,6 @@ class TopologyEngine:
                 if rec.is_partial:
                     partial_alns[rec.q_name].append(rec)
 
-        slack = self._max_overlap + 50
-
         resolved_paths = []
         used_records = set()  # Tracks (t_name, idx) of fragments successfully stitched
 
@@ -189,6 +193,14 @@ class TopologyEngine:
             # Sort strictly by 5' -> 3' query coordinates
             fragments.sort(key=lambda x: x.q_start)
             used_in_this_qname = set()
+
+            # Shortcuts for _fits, to skip the graph search, by the largest link overlap at each end: a fragment that
+            # doesn't reach its contig end by it reaches it by no link's, and as a link never overlaps more than either
+            # contig's length, no path overlaps itself by more either
+            exit_overlaps = [self._end_overlap[f.t_name, f.strand, True] for f in fragments]
+            entry_overlaps = [self._end_overlap[f.t_name, f.strand, False] for f in fragments]
+            can_leave = [f.hangs_3p(o + OVERLAP_SLACK) for f, o in zip(fragments, exit_overlaps)]
+            can_enter = [f.hangs_5p(o + OVERLAP_SLACK) for f, o in zip(fragments, entry_overlaps)]
 
             for i in range(len(fragments)):
                 if i in used_in_this_qname:
@@ -214,33 +226,28 @@ class TopologyEngine:
                         next_frag = fragments[j]
                         expected_gap = next_frag.q_start - curr_frag.q_end
 
-                        # Fragments must be sequentially downstream on the query; adjacent contigs share
-                        # their edge overlap, so their fragments may overlap on the query by that much
-                        if expected_gap < -slack:
-                            continue
-
                         # Stitching joins contigs; two fragments on one contig at the right spacing are the inverted
                         # repeats of a cross-mapping relative, and the graph search would call them adjacent
                         if next_frag.t_name == curr_frag.t_name:
                             continue
 
-                        # The contig path's length counts neither end contig, so each fragment must run off the end
-                        # the path crosses, give or take the overlap; else the rest of its contig lands in the locus
-                        if not (curr_frag.hangs_3p(slack) and next_frag.hangs_5p(slack)):
+                        if not (can_leave[curr_idx] and can_enter[j] and
+                                expected_gap >= -min(exit_overlaps[curr_idx], entry_overlaps[j]) - OVERLAP_SLACK):
                             continue
 
                         # Ask the graph if these two fragments physically connect
+                        fits = partial(self._fits, curr_frag, next_frag, expected_gap)
                         if self.mode == 'collapse':
                             paths = self._find_collapsed_path(
                                 curr_frag.t_name, curr_frag.strand,
                                 next_frag.t_name, next_frag.strand,
-                                expected_gap, tolerance=2000
+                                expected_gap, tolerance=2000, fits=fits
                             )
                         else:
                             paths = self._find_bounded_paths(
                                 curr_frag.t_name, curr_frag.strand,
                                 next_frag.t_name, next_frag.strand,
-                                expected_gap, tolerance=2000
+                                expected_gap, tolerance=2000, fits=fits
                             )
 
 
@@ -331,6 +338,19 @@ class TopologyEngine:
                 inside = (batch.t_starts >= f.t_start) & (batch.t_ends <= f.t_end)
                 used_records.update((f.t_name, int(i)) for i in np.flatnonzero(inside))
 
+    @staticmethod
+    def _fits(u: 'AlignmentRecord', v: 'AlignmentRecord', expected_gap: int, path: dict) -> bool:
+        """
+        True if fragments u and v can sit at either end of the contig path, give or take the links' overlaps.
+
+        The path length counts neither end contig, so u must run off the end of its contig the path leaves by, within
+        the first link's overlap, and v off the end it enters by, within the last link's; else the rest of that contig
+        lands in the locus uncounted. u and v may overlap on the query by no more than the path overlaps itself: the
+        link's overlap for two linked contigs, nothing across a contig longer than the links joining it.
+        """
+        return (u.hangs_3p(path['overlaps'][0] + OVERLAP_SLACK) and v.hangs_5p(path['overlaps'][-1] + OVERLAP_SLACK)
+                and expected_gap >= min(path['length'], 0) - OVERLAP_SLACK)
+
     def _build_stitching_payload(self, h_u: 'AlignmentRecord', h_v: 'AlignmentRecord', path_contigs: list[str],
                                  path_strands: list[Strand]) -> list['AlignmentRecord']:
         """
@@ -371,7 +391,8 @@ class TopologyEngine:
         return payload
 
     def _find_bounded_paths(self, start_ctg: str, start_strand: Strand, target_ctg: str,
-                            target_strand: Strand, expected_len: int, tolerance: int) -> list[dict]:
+                            target_strand: Strand, expected_len: int, tolerance: int,
+                            fits: Callable[[dict], bool] = lambda path: True) -> list[dict]:
         """
         Finds all physical paths between two contigs within a length constraint.
 
@@ -382,22 +403,26 @@ class TopologyEngine:
             target_strand: Required strand to enter the target contig.
             expected_len: The gap distance observed in the query sequence.
             tolerance: bp tolerance for the path length matching the expected length.
+            fits: Whether a path that reaches the target is accepted.
 
         Returns:
-            list[dict]: Valid paths found, with 'contigs', 'strands' (each contig's entry strand), 'length', and
-                'min_depth'.
+            list[dict]: Valid paths found, with 'contigs', 'strands' (each contig's entry strand), 'overlaps' (of each
+                link crossed), 'length', and 'min_depth'.
         """
-        # Stack payload: (current_contig, exit_strand, path_list, strand_list, accumulated_len, bottleneck_depth)
-        stack = [(start_ctg, start_strand, [start_ctg], [start_strand], 0, float('inf'))]
+        # Stack payload: (current_contig, exit_strand, path_list, strand_list, overlap_list, accumulated_len,
+        # bottleneck_depth)
+        stack: list[tuple[str, Strand, list[str], list[Strand], list[int], int, float]] = [
+            (start_ctg, start_strand, [start_ctg], [start_strand], [], 0, float('inf'))]
         valid_paths = []
 
         while stack:
-            curr_ctg, curr_strand, path, strands, dist, min_dp = stack.pop()
+            curr_ctg, curr_strand, path, strands, overlaps, dist, min_dp = stack.pop()
 
             # Base Case: Reached the Sink anchor
             if curr_ctg == target_ctg:
-                if curr_strand == target_strand:  # Did we arrive on the correct biological strand?
-                    valid_paths.append({'contigs': path, 'strands': strands, 'length': dist, 'min_depth': min_dp})
+                found = {'contigs': path, 'strands': strands, 'overlaps': overlaps, 'length': dist, 'min_depth': min_dp}
+                if curr_strand == target_strand and fits(found):  # Arrived on the right strand, at fitting fragments?
+                    valid_paths.append(found)
                 continue
 
             # Prune: We have wandered too far down a dead end
@@ -425,6 +450,7 @@ class TopologyEngine:
                     edge.v_strand,
                     path + [n_ctg],
                     strands + [edge.v_strand],
+                    overlaps + [overlap_len],
                     dist + added_dist,
                     min(min_dp, n_dp)
                 ))
@@ -432,22 +458,26 @@ class TopologyEngine:
         return valid_paths
 
     def _find_collapsed_path(self, start_ctg: str, start_strand: Strand, target_ctg: str,
-                             target_strand: Strand, expected_len: int, tolerance: int) -> list[dict]:
+                             target_strand: Strand, expected_len: int, tolerance: int,
+                             fits: Callable[[dict], bool] = lambda path: True) -> list[dict]:
         """
         Greedy pathfinder for 'collapse' mode. Always traverses the highest depth neighbor option if finds multiple branchs,
-        and backtracks to the next deepest when that branch cannot reach the target.
+        and backtracks to the next deepest when that branch cannot reach the target, or reaches it on a path that
+        `fits` rejects.
         """
-        # Stack payload: (current_contig, exit_strand, path_list, strand_list, accumulated_len, peak_depth)
+        # Stack payload: (current_contig, exit_strand, path_list, strand_list, overlap_list, accumulated_len, peak_depth)
         start_dp = float(self.contig_depths.get(start_ctg, 1.0))
-        stack = [(start_ctg, start_strand, [start_ctg], [start_strand], 0, start_dp)]
+        stack: list[tuple[str, Strand, list[str], list[Strand], list[int], int, float]] = [
+            (start_ctg, start_strand, [start_ctg], [start_strand], [], 0, start_dp)]
 
         while stack:
-            curr_ctg, curr_strand, path, strands, dist, max_dp = stack.pop()
+            curr_ctg, curr_strand, path, strands, overlaps, dist, max_dp = stack.pop()
 
             # Base Case: Reached the Sink anchor
             if curr_ctg == target_ctg:
-                if curr_strand == target_strand:
-                    return [{'contigs': path, 'strands': strands, 'length': dist, 'min_depth': max_dp}]
+                found = {'contigs': path, 'strands': strands, 'overlaps': overlaps, 'length': dist, 'min_depth': max_dp}
+                if curr_strand == target_strand and fits(found):
+                    return [found]
                 continue
 
             # Prune: We have wandered too far down a dead end
@@ -474,6 +504,7 @@ class TopologyEngine:
                     edge.v_strand,
                     path + [n_ctg],
                     strands + [edge.v_strand],
+                    overlaps + [overlap_len],
                     dist + added_dist,
                     max(max_dp, n_dp) # Track the peak depth of the collapsed hub
                 ))
