@@ -508,6 +508,8 @@ class TopologyEngine:
                 v = edge.v
                 if (v, edge.v_strand) in visited_edges: continue
                 visited_edges.add((v, edge.v_strand))
+                # Linked contigs share the edge overlap, so the next contig starts that much before this one ends
+                new_shift = shift + self.contig_lengths[curr_ctg] - edge.overlap
 
                 if v in self.features:
                     n_ints = self.features[v]
@@ -521,7 +523,6 @@ class TopologyEngine:
                             self._visited_nodes.add((v, n_ints.original_indices[i]))
 
                         batch = n_ints.filter(valid_indices)
-                        new_shift = shift + self.contig_lengths[curr_ctg]
                         flip_len = self.contig_lengths[v] if edge.v_strand == Strand.REVERSE else None
 
                         projected_batch = batch.project(shift=new_shift, flip_length=flip_len)
@@ -531,6 +532,6 @@ class TopologyEngine:
                         rem_hops -= found_count
 
                 if rem_hops > 0:
-                    queue.append((v, edge.v_strand, rem_hops, node_depth + 1, shift + self.contig_lengths[curr_ctg]))
+                    queue.append((v, edge.v_strand, rem_hops, node_depth + 1, new_shift))
 
         return projected_results
