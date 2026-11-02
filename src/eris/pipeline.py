@@ -340,58 +340,65 @@ class LocusBuilder:
 
     def _build_local(self, contig: str, alignment_batch: 'AlignmentBatch', gene_intervals: 'IntervalBatch') -> list[
         'Locus']:
-        """Identifies loci within a single contig."""
+        """
+        Identifies loci within a single contig.
+
+        Hits are merged per IS, so two different IS elements back to back (e.g. a tandem IS600/ISEc52 pair) stay
+        separate loci, while fragments of one IS still merge; competing hits at one place were already culled.
+        """
         loci = []
-        aln_intervals = alignment_batch.to_intervals().sort()
-        macro_intervals = aln_intervals.merge(tolerance=self.locus_tolerance)
+        for _, q_batch in alignment_batch.split(by_query=True):
+            aln_intervals = q_batch.to_intervals().sort()
+            macro_intervals = aln_intervals.merge(tolerance=self.locus_tolerance)
 
-        for i in range(len(macro_intervals)):
-            macro = macro_intervals[i]
-            target_indices = aln_intervals.query(macro.start, macro.end)
+            for i in range(len(macro_intervals)):
+                macro = macro_intervals[i]
+                target_indices = aln_intervals.query(macro.start, macro.end)
 
-            # Map the sorted spatial indices back to the original alignment batch
-            orig_indices = aln_intervals.original_indices[target_indices]
+                # Map the sorted spatial indices back to this IS's alignment batch
+                orig_indices = aln_intervals.original_indices[target_indices]
 
-            if not (targets := [alignment_batch.get_record(idx) for idx in orig_indices]):
-                continue
+                if not (targets := [q_batch.get_record(idx) for idx in orig_indices]):
+                    continue
 
-            target_features = [
-                GenomicFeature(t.q_name, self.target_feature_type,
-                               [LocationSegment(contig, t.t_start, t.t_end, Strand(t.strand))],
-                               identity=t.identity)
-                for t in targets
-            ]
+                target_features = [
+                    GenomicFeature(t.q_name, self.target_feature_type,
+                                   [LocationSegment(contig, t.t_start, t.t_end, Strand(t.strand))],
+                                   identity=t.identity)
+                    for t in targets
+                ]
 
-            # Collapse mode's copy number is set once every locus is built (see assign_copy_numbers)
-            locus = Locus(
-                id=f"locus_{uuid4().hex[:8]}", contig=contig, start=macro.start, end=macro.end,
-                targets=target_features, passengers=[], upstream_flanks=[], downstream_flanks=[]
-            )
+                # Collapse mode's copy number is set once every locus is built (see assign_copy_numbers)
+                locus = Locus(
+                    id=f"locus_{uuid4().hex[:8]}", contig=contig, start=macro.start, end=macro.end,
+                    targets=target_features, passengers=[], upstream_flanks=[], downstream_flanks=[]
+                )
 
-            # Determine macro target context bounds
-            primary_strand = Strand(targets[0].strand)
-            macro_bounds = (macro.start, macro.end)
+                # Determine macro target context bounds
+                primary_strand = Strand(targets[0].strand)
+                macro_bounds = (macro.start, macro.end)
 
-            internal_indices = gene_intervals.query(macro.start, macro.end)
-            for idx in internal_indices:
-                locus.passengers.append(
-                    self._resolve_relation(contig, idx, gene_intervals, Context.INSIDE, 0, 0, primary_strand,
-                                           macro_bounds))
+                internal_indices = gene_intervals.query(macro.start, macro.end)
+                for idx in internal_indices:
+                    locus.passengers.append(
+                        self._resolve_relation(contig, idx, gene_intervals, Context.INSIDE, 0, 0, primary_strand,
+                                               macro_bounds))
 
-            if primary_strand == Strand.REVERSE:
-                u_dir, u_bound = 1, macro.end
-                d_dir, d_bound = -1, macro.start
-            else:
-                u_dir, u_bound = -1, macro.start
-                d_dir, d_bound = 1, macro.end
+                if primary_strand == Strand.REVERSE:
+                    u_dir, u_bound = 1, macro.end
+                    d_dir, d_bound = -1, macro.start
+                else:
+                    u_dir, u_bound = -1, macro.start
+                    d_dir, d_bound = 1, macro.end
 
-            self._extract_flanks(contig, u_bound, u_dir, Context.UPSTREAM, gene_intervals, locus.upstream_flanks,
-                                 primary_strand, macro_bounds)
-            self._extract_flanks(contig, d_bound, d_dir, Context.DOWNSTREAM, gene_intervals, locus.downstream_flanks,
-                                 primary_strand, macro_bounds)
+                self._extract_flanks(contig, u_bound, u_dir, Context.UPSTREAM, gene_intervals, locus.upstream_flanks,
+                                     primary_strand, macro_bounds)
+                self._extract_flanks(contig, d_bound, d_dir, Context.DOWNSTREAM, gene_intervals,
+                                     locus.downstream_flanks, primary_strand, macro_bounds)
 
-            loci.append(locus)
+                loci.append(locus)
 
+        loci.sort(key=lambda l: l.start)
         return loci
 
     def _stitch(self, fragments: list['AlignmentRecord']) -> 'Locus':
