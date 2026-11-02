@@ -47,6 +47,22 @@ def test_assemble_drops_local_alignments_below_min_identity():
     assert [(locus.start, [t.identity for t in locus.targets]) for locus in loci] == [(1000, [pytest.approx(0.99)])]
 
 
+def test_assemble_keeps_different_is_elements_back_to_back_as_separate_loci():
+    # A tandem IS600/ISEc52 pair touching on the contig is two elements; two pieces of one IS1 are one
+    builder = _builder({"ctgA": 10000})
+    alignments = {"ctgA": _batch([
+        ("IS600", 1000, 0, 1000, "ctgA", 10000, 1000, 2000, 1000, 1000),
+        ("ISEc52", 1000, 0, 1000, "ctgA", 10000, 1950, 2950, 1000, 1000),
+        ("IS1", 1000, 0, 600, "ctgA", 10000, 5000, 5600, 600, 600),
+        ("IS1", 1000, 500, 1000, "ctgA", 10000, 5500, 6000, 500, 500),
+    ])}
+
+    loci = list(builder.assemble(alignments, min_coverage=0.30))
+
+    assert [(locus.start, locus.end, [t.id for t in locus.targets]) for locus in loci] == [
+        (1000, 2000, ["IS600"]), (1950, 2950, ["ISEc52"]), (5000, 6000, ["IS1", "IS1"])]
+
+
 def test_assemble_pools_identity_of_a_stitched_locus_over_its_real_fragments():
     # IS1 runs off the end of ctgA, across the unaligned ctgB, and into the start of ctgC
     edges = [Edge("ctgA", Strand.FORWARD, "ctgB", Strand.FORWARD, overlap=0),
