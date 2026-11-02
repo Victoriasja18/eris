@@ -9,7 +9,7 @@ from re import compile as re_compile
 from gzip import open as gzopen
 from bz2 import open as bzopen
 from lzma import open as lzopen
-from sys import stdout
+from sys import stdout, stderr
 
 from Bio.Seq import Seq
 from Bio.SeqIO.FastaIO import FastaIterator
@@ -36,6 +36,112 @@ class _Handle:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self._handle.close()
+
+# Gene output filtering (_cds.fna, _proteins.faa) ----------------------------------------------------------------------
+
+_FNA_HEADER_RE = re_compile(
+    r'^>(?P<idtok>\S+)\s+(?P<contig>.+):(?P<start>\d+)-(?P<end>\d+)\s+strand=(?P<strand>[+-])\s*$'
+)
+_FNA_IDTOK_RE = re_compile(r'^(?P<base>.*)_FGS_(?P<n>\d+)$')
+_HEADER_UNSAFE_RE = re_compile(r'[^\w.-]')
+
+
+def _sanitize_header_token(token: str) -> str:
+    """Replaces characters unsafe/confusing in a FASTA header id (e.g. '/') with '_'."""
+    return _HEADER_UNSAFE_RE.sub('_', token)
+
+
+def _load_locus_lookup(report_path: str) -> Optional[dict[str, tuple[str, str]]]:
+    """Builds a `{contig}_{start}_{end}` (0-based) -> (target, context) lookup from `_report.tsv`.
+
+    Returns None if the report is missing or malformed; an empty dict if it has no usable rows.
+    """
+    if not Path(report_path).exists():
+        return None
+
+    lookup: dict[str, tuple[str, str]] = {}
+    with open(report_path) as fh:
+        header_cols = fh.readline().rstrip("\n").split("\t")
+        try:
+            gid_i = header_cols.index("gene_id")
+            ctx_i = header_cols.index("context")
+            tgt_i = header_cols.index("target")
+        except ValueError:
+            return None
+        for line in fh:
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) <= max(gid_i, ctx_i, tgt_i):
+                continue
+            context = fields[ctx_i]
+            if context == "NONE":
+                continue
+            lookup.setdefault(fields[gid_i], (_sanitize_header_token(fields[tgt_i]), context))
+
+    return lookup
+
+
+def _rewrite_fgs_headers(path: str, lookup: dict[str, tuple[str, str]]) -> None:
+    """Filters and rewrites pyfgs-style FASTA records (`_cds.fna` or `_proteins.faa`) in place.
+
+    Keeps only records whose coordinates match a locus-related gene in `lookup` (i.e. genes
+    reported in `_report.tsv` as INSIDE/flanking an IS), dropping all other assembly-wide CDS.
+    Kept headers are named `{target}_{context}_{contig}_FGS_{n}` (n = pyfgs's per-contig gene
+    index, so the contig keeps names unique) and display 0-based coordinates
+    (matching `_report.tsv`'s gene_id) instead of pyfgs's default 1-based display.
+    """
+    keep = False
+    tmp_path = f"{path}.tmp"
+    with open(path) as src, open(tmp_path, "w") as dst:
+        for line in src:
+            if not line.startswith(">"):
+                if keep:
+                    dst.write(line)
+                continue
+
+            m = _FNA_HEADER_RE.match(line.rstrip("\n"))
+            if not m:
+                keep = False
+                continue
+
+            idtok, contig, start, end, strand = m.group("idtok", "contig", "start", "end", "strand")
+            start0 = int(start) - 1
+            hit = lookup.get(f"{contig}_{start0}_{end}")
+            keep = hit is not None
+            if not keep:
+                continue
+
+            idm = _FNA_IDTOK_RE.match(idtok)
+            n = idm.group("n") if idm else "1"
+            dst.write(f">{hit[0]}_{hit[1]}_{_sanitize_header_token(contig)}_FGS_{n} {contig}:{start0}-{end} strand={strand}\n")
+
+    Path(tmp_path).replace(path)
+
+
+def _filter_gene_outputs(prefix: str) -> None:
+    """Reduces `{prefix}_cds.fna` and `{prefix}_proteins.faa` to the IS-related genes listed in
+    `{prefix}_report.tsv`, tagging their headers with locus target/context (0-based coordinates).
+    `{prefix}_assembly.gff` is left untouched and keeps all assembly-wide genes.
+
+    Best-effort: any failure is logged to stderr and leaves the files untouched rather
+    than crashing the pipeline after it has already produced valid output.
+    """
+    try:
+        _do_filter_gene_outputs(prefix)
+    except Exception as e:
+        stderr.write(f"[eris] _filter_gene_outputs failed ({type(e).__name__}: {e}); gene files left unchanged\n")
+
+
+def _do_filter_gene_outputs(prefix: str) -> None:
+    report_path = f"{prefix}_report.tsv"
+    lookup = _load_locus_lookup(report_path)
+    if lookup is None:
+        return
+
+    for path in (f"{prefix}_cds.fna", f"{prefix}_proteins.faa"):
+        if not Path(path).exists():
+            continue
+        _rewrite_fgs_headers(path, lookup)
+
 
 # Readers --------------------------------------------------------------------------------------------------------------
 class GfaReader(_Handle):
@@ -294,7 +400,7 @@ class OutputManager:
         Args:
             prefix: Filename prefix for all output files. If None, TSV is sent to stdout.
             write_gff: Whether to output an assembly-wide GFF3 file.
-            write_faa: Whether to output an assembly-wide protein FASTA file.
+            write_faa: Whether to output a protein FASTA of IS-related genes.
             mode: Pipeline mode ('variant' or 'collapse') to determine TSV headers.
         """
         self.prefix = prefix
@@ -337,6 +443,8 @@ class OutputManager:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self._stack.__exit__(exc_type, exc_val, exc_tb)
+        if exc_type is None and self.prefix and (self.write_fna or self.write_faa):
+            _filter_gene_outputs(self.prefix)
 
     # --- Helper methods ---
 

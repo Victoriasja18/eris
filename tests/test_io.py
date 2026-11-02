@@ -82,3 +82,17 @@ def test_variant_report_keeps_fractional_depth_as_its_last_column(tmp_path):
     row = _report(tmp_path, locus, 'variant')
 
     assert list(row)[-1] == "fractional_depth" and row["fractional_depth"] == "0.5"
+
+
+def test_gene_fastas_keep_only_report_genes_named_by_target_and_context(tmp_path):
+    prefix = str(tmp_path / "out")
+    (tmp_path / "out_report.tsv").write_text(
+        "locus_id\ttarget\tgene_id\tcontext\n"
+        "locus_1\tIS1/A\tctg_1_10_19\tINSIDE\n"
+        "locus_1\tIS1/A\tNone\tNONE\n")
+    (tmp_path / "out_cds.fna").write_text(
+        ">ctg_1_FGS_1 ctg_1:11-19 strand=+\nATGAAATAA\n>ctg_1_FGS_2 ctg_1:31-39 strand=-\nATGAAACTA\n")
+    from eris.io import _filter_gene_outputs
+    _filter_gene_outputs(prefix)
+
+    assert (tmp_path / "out_cds.fna").read_text() == ">IS1_A_INSIDE_ctg_1_FGS_1 ctg_1:10-19 strand=+\nATGAAATAA\n"
