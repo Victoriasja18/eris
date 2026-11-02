@@ -12,6 +12,10 @@ ISFINDER_ROWS = (
     '49,IS1F,IS1,,IS1T,IS1X1,Escherichia coli\n'
     '79,IS30D,IS30,,IS30,IS30,Escherichia coli\n'
     '1,ISEc52,IS3,,NA,ISEc53,Escherichia coli\n'
+    '2,ISEc53,ISL3,,,,Escherichia coli\n'
+    '3,IS30,IS30,,"IS121, Tn2700, Tn2702",,Escherichia coli\n'
+    '4,IS26,IS6,,"IS6, IS26L, IS26R, IS46, IS140, IS160, I",,Proteus vulgaris\n'
+    '5,IS66,IS66,,"IS66-1, IS66v1, IS66t, IS66v2, IS66-1, I",IS66,Agrobacterium tumefaciens\n'
 )
 
 
@@ -39,8 +43,14 @@ def test_first_seen_name_wins(resolver):
     assert resolver.canonical('IS1A_IS1_unknown') == 'IS1B_IS1_unknown'
     assert resolver.canonical('IS30D_IS30_unknown') == 'IS30D_IS30_unknown'
     assert resolver.canonical('IS30_IS30_unknown') == 'IS30D_IS30_unknown'
-    assert resolver.canonical('ISEc53_IS3_unknown') == 'ISEc53_IS3_unknown'
-    assert resolver.canonical('ISEc52_IS3_unknown') == 'ISEc53_IS3_unknown'
+
+
+def test_junk_tokens_and_other_families_not_merged(resolver):
+    # 'I' is listed as a synonym of both IS26 and IS66; ISEc52 (IS3) lists ISEc53 (ISL3) as an isoform
+    assert resolver.canonical('IS26_IS6_unknown') == 'IS26_IS6_unknown'
+    assert resolver.canonical('IS66_IS66_unknown') == 'IS66_IS66_unknown'
+    assert resolver.canonical('ISEc53_ISL3_unknown') == 'ISEc53_ISL3_unknown'
+    assert resolver.canonical('ISEc52_IS3_unknown') == 'ISEc52_IS3_unknown'
 
 
 def test_lookalike_names_not_merged(resolver):

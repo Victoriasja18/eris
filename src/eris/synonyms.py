@@ -97,21 +97,22 @@ class SynonymResolver:
         self._load_isfinder_table(Path(table))
 
     def _load_isfinder_table(self, path: Path):
-        """Links names via the 'Synomyns' and 'Iso' columns of ISfinder's IS.csv."""
+        """
+        Links names via the 'Synomyns' and 'Iso' columns of ISfinder's IS.csv, with the guards of
+        scripts/build_isoform_groups.py: a cell token is only linked when it is itself an IS name in the table, so
+        junk such as 'I' (listed as a synonym of both IS26 and IS66) can't join groups, and two names of different
+        families are never linked.
+        """
         with open(path, newline='') as handle:
-            reader = csv.reader(handle)
-            header = next(reader, [])
-            cols = {h.strip().lower(): i for i, h in enumerate(header)}
-            name_i = cols.get('name', 1)
-            syn_i = cols.get('synomyns', cols.get('synonyms', 4))
-            iso_i = cols.get('iso', 5)
-            for row in reader:
-                if len(row) <= max(name_i, syn_i, iso_i) or not (name := row[name_i].strip()):
-                    continue
-                for field in (row[syn_i], row[iso_i]):
-                    for other in field.split(','):
-                        if (other := other.strip()) and other.upper() != 'NA':
-                            self._uf.union(name, other)
+            rows = list(csv.DictReader(handle))
+        family = {r['Name'].strip(): r['Family'].strip() for r in rows if r.get('Name', '').strip()}
+        for r in rows:
+            if (name := r.get('Name', '').strip()) not in family:
+                continue
+            for col in ('Synomyns', 'Iso'):
+                for other in (t.strip() for t in (r.get(col) or '').split(',')):
+                    if other in family and other != name and family[other] == family[name]:
+                        self._uf.union(name, other)
 
     def canonical(self, target_name: str) -> str:
         """Returns the first-seen target name of this name's synonym group (registering it if new)."""
