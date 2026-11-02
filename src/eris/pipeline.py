@@ -197,7 +197,8 @@ class LocusBuilder:
         self.features = features or {}
         self.genes = genes or {}
 
-    def assemble(self, alignments: dict, min_coverage: float = 0.30, min_identity: float = 0.0) -> Iterable['Locus']:
+    def assemble(self, alignments: dict, min_coverage: float = 0.30, min_identity: float = 0.0,
+                 candidates: Optional[dict] = None) -> Iterable['Locus']:
         """
         The main entry point for generating loci.
 
@@ -208,7 +209,7 @@ class LocusBuilder:
         """
 
         # Now expects a list of paths (lists of AlignmentRecords) instead of pairs
-        cleaned_alignments, resolved_paths = self.topology_engine.resolve_split_alignments(alignments)
+        cleaned_alignments, resolved_paths = self.topology_engine.resolve_split_alignments(alignments, candidates)
 
         # Filter and yield STITCHED paths
         kept_paths = []
@@ -506,17 +507,22 @@ class Pipeline:
         self._gene_finder = None
 
     def _process_contig(self, contig: tuple[str, Seq]) -> tuple[
-        str, Optional[IntervalBatch], Optional[AlignmentBatch], list[GenomicFeature], list[Gene]]:
+        str, Optional[IntervalBatch], Optional[AlignmentBatch], Optional[AlignmentBatch], list[GenomicFeature],
+        list[Gene]]:
         """Worker function for processing a single contig (Mapping + Gene Calling)."""
 
         if not hasattr(self._THREAD_LOCAL, "buf"):
             self._THREAD_LOCAL.buf = ThreadBuffer()
 
-        gene_batch, aln_batch, features, genes = None, None, [], []
+        gene_batch, aln_batch, near_tie_batch, features, genes = None, None, None, [], []
         contig_id, contig_seq = contig
 
         if alns := list(self.target_db.aligner.map(str(contig_seq), buf=self._THREAD_LOCAL.buf)):
-            aln_batch = AlignmentBatch.from_mappy(contig_id, len(contig_seq), alns).swap_sides().cull_overlaps()
+            all_batch = AlignmentBatch.from_mappy(contig_id, len(contig_seq), alns).swap_sides()
+            culled = all_batch.cull_overlaps()
+            aln_batch = culled
+            # Near-tied relatives as well, so stitching can pick one name for a whole path
+            near_tie_batch = all_batch.with_near_ties(culled)
 
         if genes := self._gene_finder.find_genes(bytes(contig_seq)):
             num_genes = len(genes)
@@ -537,13 +543,14 @@ class Pipeline:
             gene_batch = IntervalBatch(starts=starts, ends=ends, strands=strands,
                                        original_indices=np.arange(num_genes, dtype=np.int32)).sort()
 
-        return contig_id, gene_batch, aln_batch, features, genes
+        return contig_id, gene_batch, aln_batch, near_tie_batch, features, genes
 
     def __call__(self, genome: 'GenomeAssembly', out: Optional[Any] = None) -> Iterable['Locus']:
         """Runs the full pipeline on a genome assembly."""
         alignments, gene_intervals, gene_features, gene_cds = {}, {}, {}, {}
 
-        for contig_id, g_batch, a_batch, features, genes in self._executor.map(self._process_contig, genome):
+        candidates = {}
+        for contig_id, g_batch, a_batch, n_batch, features, genes in self._executor.map(self._process_contig, genome):
             if g_batch:
                 gene_intervals[contig_id] = g_batch
                 gene_features[contig_id] = features
@@ -552,6 +559,12 @@ class Pipeline:
                     out.write_global_genes(contig_id, bytes(genome[contig_id]), genes)
             if a_batch:
                 alignments[contig_id] = self.synonyms.rename(a_batch) if self.synonyms else a_batch
+                candidates[contig_id] = n_batch
+        if self.synonyms:
+            # After every kept hit, so a near tie never decides which name a synonym group goes by
+            candidates = {c: self.synonyms.rename(b) for c, b in candidates.items()}
+        # Synonyms renamed to one name leave the same place several times under that name
+        candidates = {c: b.cull_overlaps(per_query=True) for c, b in candidates.items()}
 
         # for batch in alignments.values():
         #     for n, _ in enumerate(batch.q_names):
@@ -574,7 +587,8 @@ class Pipeline:
             genes=gene_cds
         )
 
-        loci = builder.assemble(alignments, min_coverage=self.min_coverage, min_identity=self.min_identity)
+        loci = builder.assemble(alignments, min_coverage=self.min_coverage, min_identity=self.min_identity,
+                                candidates=candidates)
         if self.mode == 'collapse':
             # A walk out of one locus's hub stops at any other locus's hub, so every locus must be built first
             loci = list(loci)

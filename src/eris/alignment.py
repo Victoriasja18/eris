@@ -265,7 +265,7 @@ class AlignmentBatch:
         """Returns a new batch excluding the masked items."""
         return self.filter(~mask)
 
-    def cull_overlaps(self, max_overlap_fraction: float = 0.1) -> 'AlignmentBatch':
+    def cull_overlaps(self, max_overlap_fraction: float = 0.1, per_query: bool = False) -> 'AlignmentBatch':
         """
         Greedily culls overlapping alignments on the target.
 
@@ -274,6 +274,8 @@ class AlignmentBatch:
 
         Args:
             max_overlap_fraction: Maximum allowed overlap fraction before culling.
+            per_query: Only cull overlaps between alignments of the same query, e.g. one IS left at the
+                same place several times among near ties.
         """
         n = len(self)
         if n < 2: return self
@@ -284,7 +286,7 @@ class AlignmentBatch:
             s, e = self.t_starts[idx], self.t_ends[idx]
             length = e - s
             if length <= 0: continue
-            kept = kept_intervals[t_name]
+            kept = kept_intervals[(t_name, self.q_names[idx]) if per_query else t_name]
 
             overlap_found = False
             for ks, ke in kept:
@@ -297,6 +299,37 @@ class AlignmentBatch:
             kept.append((s, e))
             kept_mask[idx] = True
         return self.filter(kept_mask)
+
+    def with_near_ties(self, culled: 'AlignmentBatch', max_overlap_fraction: float = 0.1,
+                       min_score_ratio: float = 0.95) -> 'AlignmentBatch':
+        """
+        Returns `culled` plus the hits it dropped that nearly tie a kept partial hit at the same place.
+
+        Close relatives (e.g. IS600 / ISSd1 / ISSfl10) can score the same on a short contig, so the name
+        cull_overlaps() keeps there is close to arbitrary. Keeping the near ties lets stitching choose one
+        name for a whole path. Only partial winners get alternatives: a full-length hit is left alone.
+
+        Args:
+            culled: The result of cull_overlaps() on this batch.
+            max_overlap_fraction: Overlap (of the shorter hit) for a dropped hit to compete with a kept one.
+            min_score_ratio: Minimum score of a dropped hit relative to the kept hit it overlaps.
+        """
+        kept = {(t, s, e, q) for t, s, e, q in zip(culled.t_names, culled.t_starts, culled.t_ends, culled.q_names)}
+        winners = [(culled.t_names[i], culled.t_starts[i], culled.t_ends[i], culled.scores[i])
+                   for i in range(len(culled)) if culled.get_record(i).is_partial]
+        mask = np.zeros(len(self), dtype=bool)
+        for i in range(len(self)):
+            t, s, e = self.t_names[i], self.t_starts[i], self.t_ends[i]
+            if (t, s, e, self.q_names[i]) in kept:
+                mask[i] = True
+                continue
+            for wt, ws, we, w_score in winners:
+                overlap = min(e, we) - max(s, ws)
+                if wt == t and overlap > max_overlap_fraction * min(e - s, we - ws) \
+                        and self.scores[i] >= min_score_ratio * w_score:
+                    mask[i] = True
+                    break
+        return self.filter(mask)
 
     def swap_sides(self) -> 'AlignmentBatch':
         """

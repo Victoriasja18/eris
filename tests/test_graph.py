@@ -496,3 +496,58 @@ def test_synthetic_node_carries_the_strand_its_contig_is_entered_on(mode):
 
     assert [(f.t_name, Strand(f.strand)) for f in paths[0]] == [
         ("ctgA", Strand.FORWARD), ("ctgB", Strand.REVERSE), ("ctgC", Strand.FORWARD)]
+
+
+def _hits(t_name, rows):
+    # rows: (q_name, q_start, q_end, t_start, t_end, matches); every IS reference is 2000 bp
+    n = len(rows)
+    return AlignmentBatch(
+        q_names=np.array([r[0] for r in rows], dtype=object), q_lengths=np.full(n, 2000, dtype=np.int32),
+        q_starts=np.array([r[1] for r in rows], dtype=np.int32), q_ends=np.array([r[2] for r in rows], dtype=np.int32),
+        t_names=np.array([t_name] * n, dtype=object), t_lengths=np.full(n, 1000, dtype=np.int32),
+        t_starts=np.array([r[3] for r in rows], dtype=np.int32), t_ends=np.array([r[4] for r in rows], dtype=np.int32),
+        strands=np.full(n, Strand.FORWARD, dtype=np.int8), lengths=np.array([r[4] - r[3] for r in rows], dtype=np.int32),
+        matches=np.array([r[5] for r in rows], dtype=np.int32), mismatches=np.zeros(n, dtype=np.int32),
+        qualities=np.full(n, 60, dtype=np.int32), cigars=np.array(["*"] * n, dtype=object)
+    )
+
+
+def _relatives_engine():
+    # ctgA holds the first half of one IS, ctgB the second half. On ctgA the relatives ISx and ISy
+    # nearly tie and ISx wins; on ctgB only ISy matches.
+    edges = [Edge("ctgA", Strand.FORWARD, "ctgB", Strand.FORWARD, overlap=0)]
+    engine = TopologyEngine(edges, {"ctgA": 1000, "ctgB": 1000}, {"ctgA": 10.0, "ctgB": 10.0}, mode='variant')
+    everything = {"ctgA": _hits("ctgA", [("ISx", 0, 1000, 0, 1000, 1000), ("ISy", 0, 1000, 0, 1000, 990)]),
+                  "ctgB": _hits("ctgB", [("ISy", 1000, 2000, 0, 1000, 1000)])}
+    culled = {c: b.cull_overlaps() for c, b in everything.items()}
+    candidates = {c: everything[c].with_near_ties(culled[c]) for c in everything}
+    return engine, culled, candidates
+
+
+def test_relatives_split_one_is_without_candidates():
+    engine, culled, _ = _relatives_engine()
+    cleaned, paths = engine.resolve_split_alignments(culled)
+    assert paths == []
+    assert sorted(b.q_names[0] for b in cleaned.values()) == ["ISx", "ISy"]
+
+
+def test_relatives_stitched_under_best_total_name():
+    engine, culled, candidates = _relatives_engine()
+    cleaned, paths = engine.resolve_split_alignments(culled, candidates)
+    assert len(paths) == 1
+    assert {f.q_name for f in paths[0]} == {"ISy"}
+    assert [f.t_name for f in paths[0]] == ["ctgA", "ctgB"]
+    assert cleaned == {}  # the ISx hit on ctgA belongs to the stitched ISy, so it is not reported again
+
+
+def test_short_claimed_piece_does_not_consume_a_longer_hit():
+    # A stitched ISy path claims only 0-100 of ctgA; the ISz hit at 0-900 there must survive
+    edges = [Edge("ctgA", Strand.FORWARD, "ctgB", Strand.FORWARD, overlap=0)]
+    engine = TopologyEngine(edges, {"ctgA": 1000, "ctgB": 1000}, {"ctgA": 10.0, "ctgB": 10.0}, mode='variant')
+    alignments = {"ctgA": _hits("ctgA", [("ISz", 0, 900, 0, 900, 900)]),
+                  "ctgB": _hits("ctgB", [("ISy", 1000, 2000, 0, 1000, 1000)])}
+    candidates = {"ctgA": _hits("ctgA", [("ISz", 0, 900, 0, 900, 900), ("ISy", 900, 1000, 900, 1000, 100)]),
+                  "ctgB": alignments["ctgB"]}
+    cleaned, paths = engine.resolve_split_alignments(alignments, candidates)
+    assert len(paths) == 1
+    assert list(cleaned["ctgA"].q_names) == ["ISz"]
