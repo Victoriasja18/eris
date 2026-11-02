@@ -5,6 +5,7 @@ from pathlib import Path
 from eris.io import GenomeAssembly, TargetDatabase
 from eris.pipeline import Pipeline
 from eris.constants import FeatureType
+from isoforms import read_isoform_groups
 from relation_scoring import GenePlacer, read_truth, report, score_relations
 
 DATA_DIR = Path("data")
@@ -20,11 +21,11 @@ needs_data = pytest.mark.skipif(
     reason=f"integration data not found in {DATA_DIR}/",
 )
 
-def compute_metrics(truth_file: Path, eris_loci: list, families: dict[str, str] | None = None, count: str = 'max'):
+def compute_metrics(truth_file: Path, eris_loci: list, groups: dict[str, str] | None = None, count: str = 'max'):
     """
     Evaluates the IS element copy counts against the ground truth. See `count_copies` for the arguments.
     """
-    gt_counts, eris_counts = count_copies(truth_file, eris_loci, families, count)
+    gt_counts, eris_counts = count_copies(truth_file, eris_loci, groups, count)
 
     # Calculate TP, FP, FN
     all_is = set(gt_counts.keys()).union(set(eris_counts.keys()))
@@ -49,18 +50,19 @@ def compute_metrics(truth_file: Path, eris_loci: list, families: dict[str, str] 
     return precision, recall, f1
 
 
-def count_copies(truth_file: Path, eris_loci: list, families: dict[str, str] | None = None,
+def count_copies(truth_file: Path, eris_loci: list, groups: dict[str, str] | None = None,
                  count: str = 'max') -> tuple[dict[str, int], dict[str, int]]:
     """
     Returns the (truth, eris) IS copy counts, keyed by IS name.
 
-    If `families` maps IS names to families, counts are compared per family, so cross-mapping
-    relatives (e.g. IS600 called where the truth has ISSd1, both IS3) are not scored as errors.
+    If `groups` maps IS names to groups, counts are compared per group, and a name it does not list is its own group.
+    With isoform groups (`read_isoform_groups`), a naming swap such as IS600 called where the truth has ISSd1 is not
+    scored as an error; with IS families, unrelated members of one family also offset each other's errors.
 
     `count` sets how an IS's loci become a copy count: 'max' takes max(#loci, max copy number), which
     forgives a locus reported twice; 'sum' adds up every locus's copy number, as a user summing the report would;
-    'hub' is 'sum' with each repeat hub counted once per IS family, a guard against near-identical names each
-    reporting the same hub with the hub's copy number (#14). 'hub' needs `families`.
+    'hub' is 'sum' with each repeat hub counted once per group, a guard against near-identical names each
+    reporting the same hub with the hub's copy number (#14). 'hub' needs `groups`.
     """
     # Parse Ground Truth
     gt_counts = {}
@@ -94,9 +96,9 @@ def count_copies(truth_file: Path, eris_loci: list, families: dict[str, str] | N
             # Track the max copy number depth estimate seen for this IS
             eris_depth[is_name] = max(eris_depth.get(is_name, 0), int(locus.fractional_depth))
             if count == 'hub' and (hub := locus.copy_number.hub):
-                if (families.get(is_name, is_name), hub) in counted_hubs:
+                if (groups.get(is_name, is_name), hub) in counted_hubs:
                     continue
-                counted_hubs.add((families.get(is_name, is_name), hub))
+                counted_hubs.add((groups.get(is_name, is_name), hub))
             eris_sum[is_name] = eris_sum.get(is_name, 0) + int(locus.fractional_depth)
 
     # Resolve Final Copy Counts for Eris
@@ -105,25 +107,25 @@ def count_copies(truth_file: Path, eris_loci: list, families: dict[str, str] | N
         # Eris copy count = max of the depth estimate OR the distinct physical loci anchored
         eris_counts[is_name] = max(len(eris_loci_dict[is_name]), eris_depth[is_name]) if count == 'max' else eris_sum.get(is_name, 0)
 
-    # Sum the per-name counts within each family, after the per-name copy estimate above
-    if families:
-        gt_counts, eris_counts = _sum_by_family(gt_counts, families), _sum_by_family(eris_counts, families)
+    # Sum the per-name counts within each group, after the per-name copy estimate above
+    if groups:
+        gt_counts, eris_counts = _sum_by_group(gt_counts, groups), _sum_by_group(eris_counts, groups)
 
     return gt_counts, eris_counts
 
 
-def find_overlapping_claims(eris_loci: list, families: dict[str, str]) -> list[tuple[str, str, str]]:
+def find_overlapping_claims(eris_loci: list, groups: dict[str, str]) -> list[tuple[str, str, str]]:
     """
-    Returns (locus_a, locus_b, contig) for every two loci of the same IS family whose targets claim overlapping
+    Returns (locus_a, locus_b, contig) for every two loci of the same group (see `count_copies`) whose targets claim overlapping
     sequence on a contig. Each region of the genome holds at most one copy of an IS, so one should never be reported twice.
     """
-    claims = {}  # (family, contig) -> [(start, end, locus_id)]
+    claims = {}  # (group, contig) -> [(start, end, locus_id)]
     for locus in eris_loci:
         if not locus.targets: continue
         for target in locus.targets:
             name = target.id.split('_')[0]
             for seg in target.segments:
-                claims.setdefault((families.get(name, name), seg.contig), []).append((seg.start, seg.end, locus.id))
+                claims.setdefault((groups.get(name, name), seg.contig), []).append((seg.start, seg.end, locus.id))
 
     overlaps = set()
     for (_, contig), spans in claims.items():
@@ -136,11 +138,11 @@ def find_overlapping_claims(eris_loci: list, families: dict[str, str]) -> list[t
     return sorted(overlaps)
 
 
-def _sum_by_family(counts: dict[str, int], families: dict[str, str]) -> dict[str, int]:
+def _sum_by_group(counts: dict[str, int], groups: dict[str, str]) -> dict[str, int]:
     summed = {}
     for name, n in counts.items():
-        family = families.get(name, name)
-        summed[family] = summed.get(family, 0) + n
+        group = groups.get(name, name)
+        summed[group] = summed.get(group, 0) + n
     return summed
 
 
@@ -156,6 +158,12 @@ def families(target_db):
     return {n.rsplit('_', 2)[0]: n.rsplit('_', 2)[1] for n in target_db.aligner.seq_names if n.count('_') >= 2}
 
 
+@pytest.fixture(scope="module")
+def isoform_groups():
+    # The benchmarks score per isoform group, built by scripts/build_isoform_groups.py (docs/adr/0004)
+    return read_isoform_groups()
+
+
 # User mentioned EC958.fasta but that file only contains the chromosome.
 # The actual complete genome (chromosome + plasmids) is EC958_complete_genome.fasta.
 BENCHMARKS = {
@@ -164,11 +172,11 @@ BENCHMARKS = {
     "fragmented": ("contigs_shovill_simulated.gfa", "ec958_IS.reannotated.sorted.bed"),
 }
 
-# Families whose summed copy count is still wrong, as {family: (truth, eris)}. Every other family must match the
-# truth exactly. A family may get closer to its truth but never further away; update this table when one improves.
+# Isoform groups whose summed copy count is still wrong, as {group: (truth, eris)}. Every other group must match the
+# truth exactly. A group may get closer to its truth but never further away; update this table when one improves.
 KNOWN_COUNT_ERRORS = {
-    "complete": {"IS3": (14, 12), "IS66": (8, 10)},
-    "fragmented": {"IS1": (5, 6), "IS3": (14, 12), "IS66": (7, 10)},
+    "complete": {"ISEc49": (0, 2), "ISSen1": (1, 0), "ISSen10": (1, 0)},
+    "fragmented": {"IS1A": (3, 4), "ISEc49": (0, 2), "ISEc8": (1, 2), "ISSen1": (1, 0), "ISSen10": (1, 0)},
 }
 
 
@@ -182,41 +190,42 @@ def benchmark(request, target_db):
 
 
 @needs_data
-def test_benchmark_precision_recall(benchmark, families):
+def test_benchmark_precision_recall(benchmark, families, isoform_groups):
     _, truth_file, loci = benchmark
 
-    # IS variants (e.g., IS1A vs IS1R) cross-map heavily in nucleotide space,
-    # so exact name matches are impossible; score per IS family and report exact names for reference.
+    # Isoforms (e.g., IS1A vs IS1R) cross-map heavily in nucleotide space, so exact name matches are impossible;
+    # score per isoform group, and report exact names and IS families for reference.
     print("exact-name P=%.3f R=%.3f F1=%.3f" % compute_metrics(truth_file, loci))
-    print("family max P=%.3f R=%.3f F1=%.3f" % compute_metrics(truth_file, loci, families))
-    print("family sum P=%.3f R=%.3f F1=%.3f" % compute_metrics(truth_file, loci, families, count='sum'))
-    precision, recall, f1 = compute_metrics(truth_file, loci, families, count='hub')
-    print("family hub P=%.3f R=%.3f F1=%.3f" % (precision, recall, f1))
+    print("family hub P=%.3f R=%.3f F1=%.3f" % compute_metrics(truth_file, loci, families, count='hub'))
+    print("isoform max P=%.3f R=%.3f F1=%.3f" % compute_metrics(truth_file, loci, isoform_groups))
+    print("isoform sum P=%.3f R=%.3f F1=%.3f" % compute_metrics(truth_file, loci, isoform_groups, count='sum'))
+    precision, recall, f1 = compute_metrics(truth_file, loci, isoform_groups, count='hub')
+    print("isoform hub P=%.3f R=%.3f F1=%.3f" % (precision, recall, f1))
 
     # Score summed copy numbers, each hub once: the max-based count cannot see an IS reported twice
-    assert f1 >= 0.94, f"Family F1 on summed copy numbers must be >= 0.94, got {f1:.3f}"
+    assert f1 >= 0.94, f"Isoform F1 on summed copy numbers must be >= 0.94, got {f1:.3f}"
 
 
 @needs_data
-def test_benchmark_family_copy_counts_do_not_regress(benchmark, families):
-    # The F1 threshold hides a single double-counted IS (issue #1 scored 0.857); compare each family instead
+def test_benchmark_isoform_copy_counts_do_not_regress(benchmark, isoform_groups):
+    # The F1 threshold hides a single double-counted IS (issue #1 scored 0.857); compare each isoform group instead
     name, truth_file, loci = benchmark
-    gt_counts, eris_counts = count_copies(truth_file, loci, families, count='sum')
+    gt_counts, eris_counts = count_copies(truth_file, loci, isoform_groups, count='sum')
     known = KNOWN_COUNT_ERRORS[name]
 
     worse = {}
-    for family in sorted(set(gt_counts) | set(eris_counts)):
-        truth, eris = gt_counts.get(family, 0), eris_counts.get(family, 0)
-        allowed = abs(known[family][1] - known[family][0]) if family in known else 0
+    for group in sorted(set(gt_counts) | set(eris_counts)):
+        truth, eris = gt_counts.get(group, 0), eris_counts.get(group, 0)
+        allowed = abs(known[group][1] - known[group][0]) if group in known else 0
         if abs(eris - truth) > allowed:
-            worse[family] = (truth, eris)
+            worse[group] = (truth, eris)
     assert worse == {}, f"(truth, eris) copy counts got worse; known errors are {known}"
 
 
 @needs_data
-def test_benchmark_reports_each_copy_once(benchmark, families):
+def test_benchmark_reports_each_copy_once(benchmark, isoform_groups):
     _, _, loci = benchmark
-    assert find_overlapping_claims(loci, families) == []
+    assert find_overlapping_claims(loci, isoform_groups) == []
 
 
 # The real-read assembly collapses repeats that the simulated one keeps apart, including copies on the plasmids
@@ -233,18 +242,23 @@ def real_reads(target_db):
 
 @needs_data
 @needs_real_reads
-def test_real_reads_count_each_replicon_once(real_reads, families):
-    precision, recall, f1 = compute_metrics(DATA_DIR / REAL_READS[1], real_reads, families, count='hub')
-    print("family hub P=%.3f R=%.3f F1=%.3f" % (precision, recall, f1))
-    assert f1 >= 0.95, f"Family F1 with each hub counted once must be >= 0.95, got {f1:.3f}"
+def test_real_reads_count_each_replicon_once(real_reads, families, isoform_groups):
+    truth_file = DATA_DIR / REAL_READS[1]
+    print("exact-name P=%.3f R=%.3f F1=%.3f" % compute_metrics(truth_file, real_reads))
+    print("family hub P=%.3f R=%.3f F1=%.3f" % compute_metrics(truth_file, real_reads, families, count='hub'))
+    precision, recall, f1 = compute_metrics(truth_file, real_reads, isoform_groups, count='hub')
+    print("isoform hub P=%.3f R=%.3f F1=%.3f" % (precision, recall, f1))
+    # Lower than the other assemblies: an IS629 copy offset a missed ISSen1 at family level (0.953) but not here
+    assert f1 >= 0.93, f"Isoform F1 with each hub counted once must be >= 0.93, got {f1:.3f}"
 
 
 @needs_data
 @needs_real_reads
-def test_real_reads_report_each_hub_once(real_reads, families):
+def test_real_reads_report_each_hub_once(real_reads, families, isoform_groups):
     # Near-identical names (IS26, IS15, IS15DI, IS15DIV) each stitched a path through the IS26 hub (#14)
-    assert find_overlapping_claims(real_reads, families) == []
-    # ... and the hub is still reported, once: IS6 through the IS26 hub, IS1 through the 200-270x IS1 contigs
+    assert find_overlapping_claims(real_reads, isoform_groups) == []
+    # ... and the hub is still reported, once per family, so no other IS6 or IS1 name claims it either:
+    # IS6 through the IS26 hub, IS1 through the 200-270x IS1 contigs
     hubs = {"IS6": {"2421250", "2408206", "2421022"}, "IS1": {"2420366", "2060500", "2421094", "2421096", "2420860"}}
     claiming = {family: [locus.id for locus in real_reads
                          if any(families.get(t.id.split('_')[0]) == family and {s.contig for s in t.segments} & hub
@@ -267,16 +281,21 @@ def test_real_read_hubs_split_their_copies_by_depth_tier(real_reads):
     assert found == {name: {copies} for name, copies in expected.items()}
 
 
-def test_compute_metrics_family_level_merges_cross_mapping_relatives(tmp_path):
-    # Truth has one IS600 and one ISSd1 (both IS3 family); eris calls the shared node IS600 with 2 copies
+def test_compute_metrics_isoform_level_merges_only_naming_swaps(tmp_path):
+    # Truth has one IS600 and one ISSd1, isoforms of each other; eris calls the shared node IS600 with 2 copies
     truth = tmp_path / "truth.bed"
     truth.write_text("chr\t0\t1266\tISSd1\t0\t+\nchr\t5000\t6265\tIS600\t0\t-\n")
     stitched = SimpleNamespace(id="locus_1", fractional_depth=2.0,
                                targets=[SimpleNamespace(id="IS600_IS3_IS3_stitched")])
-    families = {"IS600": "IS3", "ISSd1": "IS3"}
+    groups = read_isoform_groups()
 
     assert compute_metrics(truth, [stitched]) == (0.5, 0.5, 0.5)
-    assert compute_metrics(truth, [stitched], families=families) == (1.0, 1.0, 1.0)
+    assert compute_metrics(truth, [stitched], groups=groups) == (1.0, 1.0, 1.0)
+
+    # IS629 and ISSen1 share the IS3 family but not an isoform group: an extra IS629 must not offset a missed ISSen1
+    truth.write_text("chr\t0\t1310\tISSen1\t0\t+\nchr\t5000\t6309\tIS629\t0\t-\n")
+    extra = SimpleNamespace(id="locus_1", fractional_depth=2.0, targets=[SimpleNamespace(id="IS629_IS3_IS3")])
+    assert compute_metrics(truth, [extra], groups=groups) == (0.5, 0.5, 0.5)
 
 
 def test_find_overlapping_claims_flags_leftover_half_of_stitched_locus():
