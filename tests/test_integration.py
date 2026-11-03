@@ -330,80 +330,87 @@ RELATION_BENCHMARKS = {
 RELATION_HOPS = 3  # eris's default
 REACH_HOPS = 20  # a miss found with this budget is put down to the budget, not to a wrong gene
 
-# Truth relations eris misses, as {(family, side, locus tag): cause}. The cause is "budget" when a run with
+# Truth relations eris misses, as {(isoform group, side, locus tag): cause}. The cause is "budget" when a run with
 # REACH_HOPS finds the relation, else "gene". A new miss fails, and so does a fixed one or one whose cause changes,
 # until this table is updated, so the benchmark can only get better.
 KNOWN_RELATION_MISSES = {
     "complete": {
-        ("IS1", "downstream", "EC958_RS30560"): "gene",
-        ("IS1", "upstream", "EC958_RS30140"): "gene",
-        ("IS1", "upstream", "EC958_RS30185"): "gene",
-        ("IS1380", "downstream", "EC958_RS24670"): "gene",
-        ("IS200/IS605", "downstream", "EC958_RS10865"): "gene",
-        ("IS200/IS605", "upstream", "EC958_RS10860"): "gene",
-        ("IS3", "downstream", "EC958_RS16660"): "budget",
-        ("IS3", "downstream", "EC958_RS20820"): "budget",
-        ("IS3", "downstream", "EC958_RS24890"): "gene",
-        ("IS3", "downstream", "EC958_RS28175"): "gene",
-        ("IS3", "downstream", "EC958_RS28255"): "gene",
-        ("IS3", "downstream", "EC958_RS29425"): "gene",
-        ("IS3", "downstream", "EC958_RS30340"): "gene",
-        ("IS3", "upstream", "EC958_RS16650"): "budget",
-        ("IS3", "upstream", "EC958_RS20830"): "gene",
-        ("IS3", "upstream", "EC958_RS24690"): "gene",
-        ("IS3", "upstream", "EC958_RS29355"): "gene",
-        ("IS3", "upstream", "EC958_RS29720"): "gene",
+        ("IS1A", "upstream", "EC958_RS30185"): "gene",
+        ("IS1X1", "downstream", "EC958_RS30560"): "gene",
+        ("IS1X1", "upstream", "EC958_RS30140"): "gene",
+        ("IS2", "downstream", "EC958_RS30340"): "gene",
+        ("IS26", "downstream", "EC958_RS25830"): "budget",
+        ("IS26", "downstream", "EC958_RS25840"): "budget",
+        ("IS26", "downstream", "EC958_RS26485"): "gene",
+        ("IS26", "downstream", "EC958_RS29660"): "gene",
+        ("IS26", "upstream", "EC958_RS29475"): "gene",
         ("IS30", "downstream", "EC958_RS16655"): "gene",
+        ("IS3411", "upstream", "EC958_RS29355"): "gene",
         ("IS5", "downstream", "EC958_RS24665"): "gene",
         ("IS5", "upstream", "EC958_RS24675"): "gene",
-        ("IS6", "downstream", "EC958_RS25830"): "budget",
-        ("IS6", "downstream", "EC958_RS25840"): "budget",
-        ("IS6", "downstream", "EC958_RS26485"): "gene",
-        ("IS6", "downstream", "EC958_RS29660"): "gene",
-        ("IS6", "upstream", "EC958_RS29475"): "gene",
-        ("IS6", "upstream", "EC958_RS29565"): "gene",
-        ("IS66", "downstream", "EC958_RS01090"): "gene",
-        ("IS66", "downstream", "EC958_RS11750"): "gene",
-        ("IS66", "downstream", "EC958_RS29550"): "gene",
-        ("ISL3", "downstream", "EC958_RS25065"): "gene",
+        ("IS600", "downstream", "EC958_RS16660"): "gene",
+        ("IS600", "downstream", "EC958_RS28175"): "gene",
+        ("IS600", "upstream", "EC958_RS16650"): "gene",
+        ("IS600", "upstream", "EC958_RS24690"): "gene",
+        ("IS609", "downstream", "EC958_RS10865"): "gene",
+        ("IS609", "upstream", "EC958_RS10860"): "gene",
+        ("IS6100", "upstream", "EC958_RS29565"): "gene",
+        ("ISEc22", "downstream", "EC958_RS29550"): "gene",
+        ("ISEc23", "downstream", "EC958_RS01090"): "gene",
+        ("ISEc23", "downstream", "EC958_RS11750"): "gene",
+        ("ISEc52", "downstream", "EC958_RS28255"): "gene",
+        ("ISEc52", "downstream", "EC958_RS29425"): "gene",
+        ("ISEc52", "upstream", "EC958_RS24680"): "gene",
+        ("ISEc53", "downstream", "EC958_RS25065"): "gene",
+        ("ISEc9", "downstream", "EC958_RS24670"): "gene",
+        ("ISSen1", "downstream", "EC958_RS24890"): "gene",
+        ("ISSen1", "upstream", "EC958_RS29720"): "gene",
+        ("ISSen10", "downstream", "EC958_RS20820"): "gene",
+        ("ISSen10", "upstream", "EC958_RS20830"): "gene",
     },
     "fragmented": {
-        ("IS1", "downstream", "EC958_RS29430"): "gene",
-        ("IS1", "downstream", "EC958_RS30560"): "gene",
-        ("IS1", "upstream", "EC958_RS30140"): "gene",
-        ("IS1380", "downstream", "EC958_RS24670"): "gene",
-        ("IS200/IS605", "downstream", "EC958_RS10865"): "gene",
-        ("IS200/IS605", "downstream", "EC958_RS11105"): "gene",
-        ("IS200/IS605", "upstream", "EC958_RS10860"): "gene",
-        ("IS200/IS605", "upstream", "EC958_RS11880"): "gene",
-        ("IS200/IS605", "upstream", "EC958_RS19340"): "gene",
-        ("IS21", "downstream", "EC958_RS07600"): "gene",
-        ("IS21", "downstream", "EC958_RS11780"): "gene",
-        ("IS21", "downstream", "EC958_RS24865"): "gene",
-        ("IS21", "upstream", "EC958_RS07585"): "budget",
-        ("IS21", "upstream", "EC958_RS15715"): "budget",
-        ("IS21", "upstream", "EC958_RS30525"): "gene",
-        ("IS3", "downstream", "EC958_RS11060"): "gene",
-        ("IS3", "downstream", "EC958_RS16660"): "gene",
-        ("IS3", "downstream", "EC958_RS20830"): "gene",
-        ("IS3", "downstream", "EC958_RS24890"): "gene",
-        ("IS3", "downstream", "EC958_RS28255"): "gene",
-        ("IS3", "downstream", "EC958_RS29425"): "gene",
-        ("IS3", "downstream", "EC958_RS30340"): "gene",
-        ("IS3", "upstream", "EC958_RS29720"): "gene",
+        ("IS100", "upstream", "EC958_RS30525"): "gene",
+        ("IS1397", "downstream", "EC958_RS11060"): "gene",
+        ("IS1X1", "downstream", "EC958_RS29430"): "gene",
+        ("IS1X1", "downstream", "EC958_RS30560"): "gene",
+        ("IS1X1", "upstream", "EC958_RS30140"): "gene",
+        ("IS2", "downstream", "EC958_RS30340"): "gene",
+        ("IS200", "downstream", "EC958_RS11105"): "gene",
+        ("IS200", "upstream", "EC958_RS11880"): "gene",
+        ("IS3411", "downstream", "EC958_RS20830"): "gene",
         ("IS5", "downstream", "EC958_RS24665"): "gene",
         ("IS5", "upstream", "EC958_RS24675"): "gene",
-        ("IS66", "downstream", "EC958_RS01090"): "gene",
-        ("IS66", "downstream", "EC958_RS11750"): "gene",
-        ("IS66", "downstream", "EC958_RS29550"): "gene",
-        ("IS66", "upstream", "EC958_RS16805"): "gene",
-        ("IS66", "upstream", "EC958_RS30005"): "gene",
-        ("IS66", "upstream", "EC958_RS30575"): "gene",
-        ("ISL3", "downstream", "EC958_RS25065"): "gene",
+        ("IS600", "downstream", "EC958_RS16660"): "gene",
+        ("IS600", "upstream", "EC958_RS16650"): "gene",
+        ("IS600", "upstream", "EC958_RS24690"): "gene",
+        ("IS609", "downstream", "EC958_RS10865"): "gene",
+        ("IS609", "upstream", "EC958_RS10860"): "gene",
+        ("IS609", "upstream", "EC958_RS19340"): "gene",
+        ("IS682", "upstream", "EC958_RS30005"): "gene",
+        ("ISEc12", "downstream", "EC958_RS07600"): "gene",
+        ("ISEc12", "downstream", "EC958_RS11780"): "gene",
+        ("ISEc12", "downstream", "EC958_RS24865"): "gene",
+        ("ISEc12", "upstream", "EC958_RS07585"): "budget",
+        ("ISEc12", "upstream", "EC958_RS15715"): "budget",
+        ("ISEc22", "downstream", "EC958_RS29550"): "gene",
+        ("ISEc22", "upstream", "EC958_RS16805"): "gene",
+        ("ISEc23", "downstream", "EC958_RS01090"): "gene",
+        ("ISEc23", "downstream", "EC958_RS11750"): "gene",
+        ("ISEc23", "upstream", "EC958_RS30575"): "gene",
+        ("ISEc52", "downstream", "EC958_RS28255"): "gene",
+        ("ISEc52", "downstream", "EC958_RS29425"): "gene",
+        ("ISEc52", "upstream", "EC958_RS24680"): "gene",
+        ("ISEc53", "downstream", "EC958_RS25065"): "gene",
+        ("ISEc9", "downstream", "EC958_RS24670"): "gene",
+        ("ISSen1", "downstream", "EC958_RS24890"): "gene",
+        ("ISSen1", "upstream", "EC958_RS29720"): "gene",
+        ("ISSen10", "downstream", "EC958_RS20820"): "gene",
+        ("ISSen10", "upstream", "EC958_RS20830"): "gene",
     },
 }
 # Found relations whose eris gene does not have the RefSeq CDS's sequence; checked on the complete genome only
-KNOWN_NUCLEOTIDE_MISMATCHES = {("IS3", "upstream", "EC958_RS24680")}
+# (ISEc52's EC958_RS24680 was one while an unrelated IS3 locus could find it; per isoform group it is a miss)
+KNOWN_NUCLEOTIDE_MISMATCHES = set()
 # Floors for (precision, recall) of DISRUPTED or TRUNCATED against truth disrupted; raise them as eris improves
 MIN_DISRUPTED = {"complete": (0.17, 0.42), "fragmented": (0.05, 0.05)}
 
@@ -431,7 +438,7 @@ def placer():
 
 
 @pytest.fixture(scope="module", params=RELATION_BENCHMARKS)
-def relation_benchmark(request, target_db, families, placer):
+def relation_benchmark(request, target_db, families, isoform_groups, placer):
     genome_file, replicons = RELATION_BENCHMARKS[request.param]
     runs, genes = {}, GeneSequences()  # gene calls do not depend on the hops budget
     for hops in (RELATION_HOPS, REACH_HOPS):
@@ -446,9 +453,10 @@ def relation_benchmark(request, target_db, families, placer):
             placements[gene_id] = placer.place(genes.by_id[gene_id])
         return placements[gene_id]
 
-    truths = read_truth(RELATION_TRUTH, families, replicons)
-    score = score_relations(truths, runs[RELATION_HOPS], families, place, reach_loci=runs[REACH_HOPS])
-    print(f"\n{request.param}:\n{report(score)}")
+    truths = read_truth(RELATION_TRUTH, isoform_groups, replicons)
+    score = score_relations(truths, runs[RELATION_HOPS], isoform_groups, place, reach_loci=runs[REACH_HOPS])
+    by_family = score_relations(read_truth(RELATION_TRUTH, families, replicons), runs[RELATION_HOPS], families, place)
+    print(f"\n{request.param}:\n{report(score, by_family)}")
     return request.param, score
 
 
