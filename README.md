@@ -70,7 +70,8 @@ Depending on the arguments provided, eris will output:
 1. **`{prefix}_report.tsv`**: A detailed report of every resolved locus, including targets and their target identity, context (INSIDE, UPSTREAM, DOWNSTREAM), biological effects, topological hops, and fractional depths.
 2. **`{prefix}_loci.fasta`**: The nucleotide sequence of each locus, with its contig path in the header. A local locus is its slice of the contig, on the contig's forward strand; a stitched locus is its target's extent read along the contig path, each contig on the strand it is read on and each edge overlap counted once.
 3. **`{prefix}_assembly.gff`**: GFF3 annotation of the global features.
-4. **`{prefix}_proteins.faa`**: Amino acid fasta of the global features.
+4. **`{prefix}_report.gff`**: GFF3 of only the genes in the report, each once, with its report `gene_id` as `ID`. Skipped with `--no-gff`.
+5. **`{prefix}_proteins.faa`**: Amino acid fasta of the global features.
 
 ## 📚 Documentation
 

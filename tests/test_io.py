@@ -1,9 +1,10 @@
 from types import SimpleNamespace
 
-from eris.constants import Strand
+from eris.constants import FeatureType, Orientation, Strand
 from eris.copy_number import CopyNumber
 from eris.io import OutputManager, ReportRow, format_contig_path, format_identities
-from eris.pipeline import GenomicFeature, LocationSegment, Locus
+from eris.interval import Context
+from eris.pipeline import FeatureRelation, GenomicFeature, LocationSegment, Locus
 
 
 def test_report_header_puts_target_identity_after_target():
@@ -82,3 +83,33 @@ def test_variant_report_keeps_fractional_depth_as_its_last_column(tmp_path):
     row = _report(tmp_path, locus, 'variant')
 
     assert list(row)[-1] == "fractional_depth" and row["fractional_depth"] == "0.5"
+
+
+def _gene(contig, start, end, strand):
+    return GenomicFeature(f"{contig}_{start}_{end}", FeatureType.CDS, [LocationSegment(contig, start, end, strand)])
+
+
+def test_report_gff_holds_each_reported_gene_once_under_its_report_id(tmp_path):
+    up, inside = _gene("ctgA", 10, 400, Strand.REVERSE), _gene("ctgA", 900, 1500, Strand.FORWARD)
+    first = _locus("locus_1", ("ctgA", 800, 1600, Strand.FORWARD))
+    first.passengers = [FeatureRelation(inside, Context.INSIDE, 0, 0, Orientation.SAME)]
+    first.upstream_flanks = [FeatureRelation(up, Context.UPSTREAM, 400, 0, Orientation.OPPOSITE)]
+    # A second locus reporting the same flank must not repeat it
+    second = _locus("locus_2", ("ctgA", 2000, 2800, Strand.FORWARD))
+    second.upstream_flanks = [FeatureRelation(up, Context.UPSTREAM, 1600, 0, Orientation.OPPOSITE)]
+    with OutputManager(str(tmp_path / "out"), write_gff=True, write_faa=False, write_fna=False) as out:
+        out.write_locus_relations(first)
+        out.write_locus_relations(second)
+
+    lines = (tmp_path / "out_report.gff").read_text().splitlines()
+    assert lines[0] == "##gff-version 3"
+    assert [line.split("\t") for line in lines[1:]] == [
+        ["ctgA", "eris", "CDS", "11", "400", ".", "-", "0", "ID=ctgA_10_400"],
+        ["ctgA", "eris", "CDS", "901", "1500", ".", "+", "0", "ID=ctgA_900_1500"],
+    ]
+
+
+def test_report_gff_is_not_written_with_no_gff(tmp_path):
+    with OutputManager(str(tmp_path / "out"), write_gff=False, write_faa=False, write_fna=False) as out:
+        out.write_locus_relations(_locus("locus_1", ("ctgA", 0, 768, Strand.FORWARD)))
+    assert not (tmp_path / "out_report.gff").exists()
