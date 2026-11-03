@@ -3,8 +3,9 @@ Scores eris's relations against the EC958 relation truth (built by scripts/build
 
 eris genes are pyfgs predictions on the assembly, so each one is first placed on the reference genome; a gene then
 matches a RefSeq CDS when it lies on the same replicon and strand and overlaps it by at least half of the shorter
-of the two. A truth relation is keyed by (IS family, side, locus tag) and is found when any eris locus of that
-family reports a matching flank on that side. See docs/adr/0002-relation-benchmark-truth.md.
+of the two. A truth relation is keyed by (group, side, locus tag) and is found when any eris locus of that group
+reports a matching flank on that side. The benchmark groups IS names by isoform group (docs/adr/0004), and prints
+scores per IS family for reference. See docs/adr/0002-relation-benchmark-truth.md.
 """
 import csv
 from collections.abc import Callable
@@ -26,13 +27,13 @@ MIN_OVERLAP = 0.5  # of the shorter of the eris gene and the RefSeq CDS
 DISRUPTING = Effect.DISRUPTED | Effect.TRUNCATED  # a truncation is a kind of disruption
 MIN_IDENTITY = 0.99  # over the aligned part, for a matched flank's sequence to count as correct
 MIN_CDS_COVERAGE = 0.8  # of the RefSeq CDS; waived when it is partial or pseudo
-RelationKey = tuple[str, str, str]  # (IS family, side, locus tag)
+RelationKey = tuple[str, str, str]  # (group, side, locus tag)
 NEAR = 150  # bp; pyfgs start codons and eris's IS ends differ from RefSeq by a few to tens of bp, so distances are banded
 
 
 @dataclass(frozen=True)
 class TruthRelation:
-    family: str
+    group: str
     side: str
     locus_tag: str
     replicon: str
@@ -46,7 +47,7 @@ class TruthRelation:
 
     @property
     def key(self) -> RelationKey:
-        return self.family, self.side, self.locus_tag
+        return self.group, self.side, self.locus_tag
 
 
 @dataclass(frozen=True)
@@ -59,7 +60,7 @@ class Placement:
     identity: float  # over the aligned part
 
 
-def read_truth(path: Path, families: dict[str, str], replicons: set[str] | None = None) -> list[TruthRelation]:
+def read_truth(path: Path, groups: dict[str, str], replicons: set[str] | None = None) -> list[TruthRelation]:
     """
     Reads the flank relations of the truth TSV, optionally only those on the given replicons. The effect of a flank
     that lies inside another IS, or whose curated effect is uncertain, is not scored.
@@ -72,7 +73,7 @@ def read_truth(path: Path, families: dict[str, str], replicons: set[str] | None 
             continue
         scored = not r['inside_is'] and r['effect'] in ('disrupted', 'none')
         truths.append(TruthRelation(
-            family=family_of(r['is_id'], families), side=r['side'], locus_tag=r['locus_tag'], replicon=r['replicon'],
+            group=group_of(r['is_id'], groups), side=r['side'], locus_tag=r['locus_tag'], replicon=r['replicon'],
             start=int(r['cds_start']), end=int(r['cds_end']), strand=r['cds_strand'], partial=r['partial'] == 'True',
             pseudo=r['pseudo'] == 'True', distance_bp=int(r['distance_bp']), effect=r['effect'] if scored else None))
     return truths
@@ -112,7 +113,7 @@ class GenePlacer:
 @dataclass(frozen=True)
 class Flank:
     """One flank reported by eris, read from a locus."""
-    family: str
+    group: str
     side: str
     relation: FeatureRelation
 
@@ -135,7 +136,7 @@ class RelationScore:
     disrupted_called_true: int = 0
     disrupted_truth: int = 0
     disrupted_truth_found: int = 0
-    upregulated: list[tuple[str, str, str]] = field(default_factory=list)  # (family, side, eris gene); not scored
+    upregulated: list[tuple[str, str, str]] = field(default_factory=list)  # (group, side, eris gene); not scored
     unplaceable: list[str] = field(default_factory=list)  # reported flank genes with no place on the reference
 
     @property
@@ -178,22 +179,25 @@ class RelationScore:
         return max(self.distance_errors, default=0)
 
 
-def family_of(name: str, families: dict[str, str]) -> str:
-    """The IS family of a target or truth IS name, e.g. 'IS600_IS3_IS3' or 'IS600_2' -> 'IS3'."""
+def group_of(name: str, groups: dict[str, str]) -> str:
+    """
+    The group of a target or truth IS name in `groups`, which maps IS names to their isoform group or IS family,
+    e.g. 'IS600_IS3_IS3' or 'IS600_2' -> 'IS600'. A name not in `groups` is its own group.
+    """
     name = name.split('_')[0]
-    return families.get(name, name)
+    return groups.get(name, name)
 
 
-def locus_family(locus, families: dict[str, str]) -> str:
-    return family_of(locus.targets[0].id, families)
+def locus_group(locus, groups: dict[str, str]) -> str:
+    return group_of(locus.targets[0].id, groups)
 
 
-def read_flanks(locus, families: dict[str, str]) -> list[Flank]:
+def read_flanks(locus, groups: dict[str, str]) -> list[Flank]:
     """Every flank of a locus, nearest first on each side, including passengers that cross an end of the IS."""
-    family = locus_family(locus, families)
-    flanks = [Flank(family, OVERLAP_SIDES[r.spatial], r) for r in locus.passengers if r.spatial in OVERLAP_SIDES]
-    flanks += [Flank(family, 'upstream', r) for r in locus.upstream_flanks]
-    flanks += [Flank(family, 'downstream', r) for r in locus.downstream_flanks]
+    group = locus_group(locus, groups)
+    flanks = [Flank(group, OVERLAP_SIDES[r.spatial], r) for r in locus.passengers if r.spatial in OVERLAP_SIDES]
+    flanks += [Flank(group, 'upstream', r) for r in locus.upstream_flanks]
+    flanks += [Flank(group, 'downstream', r) for r in locus.downstream_flanks]
     return flanks
 
 
@@ -243,27 +247,27 @@ def sequence_agrees(placement: Placement, truth: TruthRelation) -> bool:
 
 
 def matching_flanks(truth: TruthRelation, flanks: list[Flank], place: Callable[[str], list[Placement]]) -> list[Flank]:
-    """Flanks of the truth relation's family, on either side, whose gene matches its CDS."""
-    return [f for f in flanks if f.family == truth.family and any(matches(p, truth) for p in place(f.relation.feature.id))]
+    """Flanks of the truth relation's group, on either side, whose gene matches its CDS."""
+    return [f for f in flanks if f.group == truth.group and any(matches(p, truth) for p in place(f.relation.feature.id))]
 
 
-def score_relations(truths: list[TruthRelation], loci: list, families: dict[str, str],
+def score_relations(truths: list[TruthRelation], loci: list, groups: dict[str, str],
                     place: Callable[[str], list[Placement]], reach_loci: list | None = None) -> RelationScore:
     """
     Scores eris loci against the truth. `place` returns the reference placements of an eris gene by its id, or an
     empty list when the gene cannot be placed. `reach_loci` are the same assembly's loci from a run with a larger
     hops budget: a miss they find is put down to the budget rather than to a wrong gene.
     """
-    per_locus = [read_flanks(locus, families) for locus in loci]
+    per_locus = [read_flanks(locus, groups) for locus in loci]
     flanks = [f for locus_flanks in per_locus for f in locus_flanks]
     score = RelationScore(total={side: sum(t.side == side for t in truths) for side in SIDES})
     score.unplaceable = sorted({f.relation.feature.id for f in flanks if not place(f.relation.feature.id)})
-    score.upregulated = [(f.family, f.side, f.relation.feature.id) for f in flanks
+    score.upregulated = [(f.group, f.side, f.relation.feature.id) for f in flanks
                          if f.relation.effect & Effect.UPREGULATED]
     for f in (f for locus_flanks in per_locus for f in first_flanks(locus_flanks)):
         placements = place(f.relation.feature.id)
         matched = [t for t in truths
-                   if t.family == f.family and t.side == f.side and any(matches(p, t) for p in placements)]
+                   if t.group == f.group and t.side == f.side and any(matches(p, t) for p in placements)]
         score.first_flanks += 1
         score.true_first_flanks += bool(matched)
         # A flank whose effect is not scored is left out
@@ -290,19 +294,26 @@ def score_relations(truths: list[TruthRelation], loci: list, families: dict[str,
             score.nucleotide_mismatches.add(t.key)
 
     if reach_loci is not None:
-        reach_flanks = [f for locus in reach_loci for f in read_flanks(locus, families)]
+        reach_flanks = [f for locus in reach_loci for f in read_flanks(locus, groups)]
         score.budget_misses = {t.key for t in truths if t.key in score.misses
                                and any(f.side == t.side for f in matching_flanks(t, reach_flanks, place))}
     return score
 
 
-def report(score: RelationScore) -> str:
-    """A readable summary of a score, for the test log."""
+def headline(score: RelationScore) -> list[str]:
+    """Recall on each side and pooled, and precision of first flanks."""
     found = {side: sum(k[1] == side for k in score.found) for side in SIDES}
-    lines = [
+    return [
         *(f"recall {side}: {found[side]}/{score.total[side]} = {score.recall[side]:.3f}" for side in SIDES),
         f"recall pooled over sides: {len(score.found_any_side)}/{sum(score.total.values())} = {score.pooled_recall:.3f}",
         f"precision of first flanks: {score.true_first_flanks}/{score.first_flanks} = {score.precision:.3f}",
+    ]
+
+
+def report(score: RelationScore, by_family: RelationScore | None = None) -> str:
+    """A readable summary of a score, for the test log; `by_family` is the same run scored per IS family."""
+    lines = [
+        *headline(score),
         f"distance band agreement: {score.band_agreement:.3f} (median error {score.median_distance_error} bp, "
         f"max {score.max_distance_error} bp)",
         f"disrupted precision: {score.disrupted_called_true}/{score.disrupted_called} = {score.disrupted_precision:.3f}",
@@ -313,4 +324,6 @@ def report(score: RelationScore) -> str:
         f"UPREGULATED calls (not scored): {score.upregulated}",
         f"unplaceable flank genes: {score.unplaceable}",
     ]
+    if by_family is not None:
+        lines += ["per IS family, for reference:", *(f"  {line}" for line in headline(by_family))]
     return "\n".join(lines)

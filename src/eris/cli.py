@@ -54,7 +54,7 @@ def main():
     outs.add_argument('-o', '--outprefix', type=str, default=None, metavar='',
                       help='Prefix for output files (if absent, prints TSV to stdout)')
     outs.add_argument('--no-gff', action='store_true',
-                      help='Do not write GFF3 output for global genes')
+                      help='Do not write GFF3 output (global genes and reported genes)')
     outs.add_argument('--no-faa', action='store_true',
                       help='Do not write FAA output for global proteins')
     outs.add_argument('--no-fna', action='store_true',

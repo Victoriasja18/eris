@@ -385,7 +385,7 @@ class OutputManager:
     """
     Manages all file outputs and stream lifecycles for the eris pipeline.
 
-    Handles writing of the TSV report, GFF3 annotations, protein FASTA,
+    Handles writing of the TSV report, GFF3 annotations (all gene calls, and the reported ones only), protein FASTA,
     and locus nucleotide sequences.
 
     Example:
@@ -399,7 +399,7 @@ class OutputManager:
 
         Args:
             prefix: Filename prefix for all output files. If None, TSV is sent to stdout.
-            write_gff: Whether to output an assembly-wide GFF3 file.
+            write_gff: Whether to output an assembly-wide GFF3 file, and one of the reported genes only.
             write_faa: Whether to output a protein FASTA of IS-related genes.
             mode: Pipeline mode ('variant' or 'collapse') to determine TSV headers.
         """
@@ -409,6 +409,7 @@ class OutputManager:
         self.write_faa = write_faa
         self.mode = mode
         self._stack = ExitStack()
+        self._reported_genes: dict[str, 'GenomicFeature'] = {}  # by report gene_id, for the report GFF
 
     def __enter__(self):
         # 1. Setup TSV Report (Stdout or File)
@@ -442,6 +443,8 @@ class OutputManager:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.prefix and self.write_gff:
+            self._write_report_gff()
         self._stack.__exit__(exc_type, exc_val, exc_tb)
         if exc_type is None and self.prefix and (self.write_fna or self.write_faa):
             _filter_gene_outputs(self.prefix)
@@ -491,6 +494,16 @@ class OutputManager:
             copy_number=self._copy_number(locus),
         )
         self.tsv_handle.write(row.to_tsv())
+        self._reported_genes.setdefault(relation.feature.id, relation.feature)
+
+    def _write_report_gff(self):
+        """Writes the reported genes to a GFF3 file, each once, under the gene_id the report gives it."""
+        with open(f"{self.prefix}_report.gff", "w") as handle:
+            handle.write("##gff-version 3\n")
+            segments = [(s, gene.id) for gene in self._reported_genes.values() for s in gene.segments]
+            for s, gene_id in sorted(segments, key=lambda x: (x[0].contig, x[0].start, x[0].end)):
+                strand = {Strand.FORWARD: '+', Strand.REVERSE: '-'}.get(s.strand, '.')
+                handle.write(f"{s.contig}\teris\tCDS\t{s.start + 1}\t{s.end}\t.\t{strand}\t0\tID={gene_id}\n")
 
     def _copy_number(self, locus: 'Locus') -> Optional[CopyNumber]:
         """The locus's copy number for the report: collapse mode only, one copy if it was never set."""
