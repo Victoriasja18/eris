@@ -364,8 +364,13 @@ class TopologyEngine:
         `max_overlap_fraction` of the shorter span) a place already claimed. An original alignment is consumed,
         whatever its name, when claimed places cover most of it, so a short piece at its edge does not take
         a longer hit of another IS with it.
+
+        A dropped chain's places are not claimed, but an original alignment of the dropped chain's own name is still
+        consumed when those places cover most of it: it only ever continued a copy that a better path took, so it is
+        not reported again as a locus of its own (the ISx-or-ISw branch off one collapsed repeat).
         """
         claimed = defaultdict(list)  # contig -> [(start, end, name)]
+        dropped = defaultdict(list)  # contig -> [(start, end, name)] of every chain a dropped unit accounts for
 
         def overlap(s, e, cs, ce):
             return min(e, ce) - max(s, cs) > max_overlap_fraction * min(e - s, ce - cs)
@@ -379,6 +384,9 @@ class TopologyEngine:
                                        reverse=True):
             name = chain[0].q_name
             if any(taken(f.t_name, f.t_start, f.t_end, name) for f in chain):
+                for c in accounted:
+                    for f in c:
+                        dropped[f.t_name].append((int(f.t_start), int(f.t_end), name))
                 continue
             resolved_paths.append(chain)
             for c in accounted:
@@ -386,13 +394,16 @@ class TopologyEngine:
                     if c is chain or not taken(f.t_name, f.t_start, f.t_end, name):
                         claimed[f.t_name].append((int(f.t_start), int(f.t_end), name))
 
-        for t, places in claimed.items():
+        def covers_most(places, s, e):
+            return sum(max(0, min(e, ce) - max(s, cs)) for cs, ce, _ in places) > 0.5 * (e - s)
+
+        for t in claimed.keys() | dropped.keys():
             if (batch := alignments.get(t)) is None:
                 continue
             for i in range(len(batch)):
                 s, e = int(batch.t_starts[i]), int(batch.t_ends[i])
-                covered = sum(max(0, min(e, ce) - max(s, cs)) for cs, ce, _ in places)
-                if covered > 0.5 * (e - s):
+                own_dropped = [p for p in dropped[t] if p[2] == batch.q_names[i]]
+                if covers_most(claimed[t], s, e) or covers_most(own_dropped, s, e):
                     used_records.add((t, i))
         return resolved_paths
 

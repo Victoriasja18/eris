@@ -551,3 +551,34 @@ def test_short_claimed_piece_does_not_consume_a_longer_hit():
     cleaned, paths = engine.resolve_split_alignments(alignments, candidates)
     assert len(paths) == 1
     assert list(cleaned["ctgA"].q_names) == ["ISz"]
+
+
+def _branch_engine(c_name):
+    # ctgA holds the first half of an IS and links to both ctgB and ctgC, which each hold a second half. On ctgA the
+    # relatives ISx and ISw nearly tie; ctgB matches ISx, ctgC's kept hit is c_name. The ISx path through ctgB wins
+    # ctgA, so the ISw path through ctgC loses.
+    edges = [Edge("ctgA", Strand.FORWARD, "ctgB", Strand.FORWARD, overlap=0),
+             Edge("ctgA", Strand.FORWARD, "ctgC", Strand.FORWARD, overlap=0)]
+    lengths, depths = {c: 1000 for c in "ctgA ctgB ctgC".split()}, {c: 10.0 for c in "ctgA ctgB ctgC".split()}
+    engine = TopologyEngine(edges, lengths, depths, mode='collapse')
+    c_rows = [("ISw", 1000, 2000, 0, 1000, 990)] + ([] if c_name == "ISw" else [(c_name, 1000, 2000, 0, 1000, 995)])
+    everything = {"ctgA": _hits("ctgA", [("ISx", 0, 1000, 0, 1000, 1000), ("ISw", 0, 1000, 0, 1000, 995)]),
+                  "ctgB": _hits("ctgB", [("ISx", 1000, 2000, 0, 1000, 1000)]),
+                  "ctgC": _hits("ctgC", c_rows)}
+    culled = {c: b.cull_overlaps() for c, b in everything.items()}
+    candidates = {c: everything[c].with_near_ties(culled[c]) for c in everything}
+    return engine, culled, candidates
+
+
+def test_a_kept_hit_on_a_losing_path_of_its_own_name_is_not_reported_again():
+    engine, culled, candidates = _branch_engine("ISw")
+    cleaned, paths = engine.resolve_split_alignments(culled, candidates)
+    assert [[f.t_name for f in p] for p in paths] == [["ctgA", "ctgB"]]
+    assert cleaned == {}  # the ISw hit on ctgC only ever continued the ctgA copy, which the ISx path took
+
+
+def test_a_losing_path_does_not_consume_a_kept_hit_of_another_name():
+    engine, culled, candidates = _branch_engine("ISv")
+    cleaned, paths = engine.resolve_split_alignments(culled, candidates)
+    assert [[f.t_name for f in p] for p in paths] == [["ctgA", "ctgB"]]
+    assert list(cleaned["ctgC"].q_names) == ["ISv"]
