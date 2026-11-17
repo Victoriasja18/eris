@@ -37,7 +37,7 @@ def test_contig_path_of_a_local_locus_is_its_contig_on_the_target_strand():
     assert format_contig_path(_locus("locus_1", ("ctg5", 100, 1100, Strand.REVERSE))) == "ctg5-"
 
 
-def test_report_and_locus_fasta_carry_the_contig_path(tmp_path):
+def test_report_carries_the_contig_path_and_locus_fasta_the_coordinates(tmp_path):
     locus = _locus("locus_split_1", ("ctgA", 900, 1000, Strand.FORWARD), ("ctgB", 0, 500, Strand.REVERSE))
     prefix = str(tmp_path / "out")
     with OutputManager(prefix, write_gff=False, write_faa=False, write_fna=False, mode='collapse') as out:
@@ -46,7 +46,32 @@ def test_report_and_locus_fasta_carry_the_contig_path(tmp_path):
 
     header, row = (tmp_path / "out_report.tsv").read_text().splitlines()
     assert dict(zip(header.split("\t"), row.split("\t")))["contig_path"] == "ctgA+,ctgB-"
-    assert (tmp_path / "out_loci.fasta").read_text() == ">locus_split_1 path=ctgA+,ctgB-\nACGT\n"
+    assert (tmp_path / "out_loci.fasta").read_text() == (
+        ">locus_split_1 IS1 ctgA+,ctgB-\nACGT\n")
+
+
+def _locus_fasta_header(tmp_path, locus):
+    with OutputManager(str(tmp_path / "out"), write_gff=False, write_faa=False, write_fna=False) as out:
+        out.write_locus_fasta(locus, "ACGT")
+    return (tmp_path / "out_loci.fasta").read_text().splitlines()[0]
+
+
+def test_locus_fasta_header_gives_a_local_locus_its_target_contig_coordinates_and_strand(tmp_path):
+    locus = _locus("locus_1", ("ctg5", 100, 1100, Strand.REVERSE))
+    assert _locus_fasta_header(tmp_path, locus) == ">locus_1 IS1 ctg5:100-1100 strand=-"
+
+
+def test_locus_fasta_header_gives_a_merged_local_locus_all_its_targets_and_its_whole_extent(tmp_path):
+    locus = _locus("locus_1", ("ctg1", 0, 400, Strand.FORWARD))
+    locus.targets.append(GenomicFeature("IS1_frag", None, [LocationSegment("ctg1", 380, 768, Strand.FORWARD)]))
+    locus.end = 768
+    assert _locus_fasta_header(tmp_path, locus) == ">locus_1 IS1,IS1_frag ctg1:0-768 strand=+"
+
+
+def test_locus_fasta_header_gives_a_stitched_locus_its_contigs_and_strands_in_path_order(tmp_path):
+    stitched = _locus("locus_split_1", ("123456", 900, 1000, Strand.FORWARD), ("123330", 0, 500, Strand.REVERSE),
+                      ("ctgC", 0, 300, Strand.FORWARD))
+    assert _locus_fasta_header(tmp_path, stitched) == ">locus_split_1 IS1 123456+,123330-,ctgC+"
 
 
 def _report(tmp_path, locus, mode):

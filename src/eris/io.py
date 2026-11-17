@@ -561,9 +561,13 @@ class OutputManager:
             self.fna_writer.write_record(genes, contig_id)
 
     def write_locus_fasta(self, locus: 'Locus', sequence: str):
-        """Writes a single locus nucleotide sequence to the loci FASTA file, with its contig path in the header."""
+        """
+        Writes a single locus nucleotide sequence to the loci FASTA file. The header gives the locus id, its targets
+        and where it lies on the assembly, e.g. `>locus_1 IS26 ctg5:100-920 strand=-`; see `format_locus_location`.
+        """
         if self.locus_fasta:
-            self.locus_fasta.write(f">{locus.id} path={format_contig_path(locus)}\n{sequence}\n")
+            targets = ",".join(t.id for t in locus.targets)
+            self.locus_fasta.write(f">{locus.id} {targets} {format_locus_location(locus)}\n{sequence}\n")
 
 
 # Functions ------------------------------------------------------------------------------------------------------------
@@ -575,6 +579,19 @@ def _or_na(value: Optional[float]) -> str:
 def format_identities(locus: 'Locus') -> str:
     """Target identities of a locus to 4 decimals, comma-separated in the same order as its targets."""
     return ",".join(f"{t.identity:.4f}" for t in locus.targets)
+
+
+def format_locus_location(locus: 'Locus') -> str:
+    """
+    Where a locus lies on the assembly, e.g. 'ctg5:100-920 strand=-' (0-based, half-open like the report's gene_id).
+
+    A local locus is its whole extent on its contig (all its merged targets), on its first target's strand. A stitched
+    locus is its contig path, each contig with the strand it is read on, e.g. '123456+,123330-'.
+    """
+    segments = locus.targets[0].segments
+    if len(segments) == 1:
+        return f"{locus.contig}:{locus.start}-{locus.end} strand={segments[0].strand}"
+    return format_contig_path(locus)
 
 
 def format_contig_path(locus: 'Locus') -> str:
