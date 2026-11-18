@@ -5,9 +5,9 @@ import numpy as np
 from Bio.Seq import Seq
 
 from eris.alignment import AlignmentBatch
-from eris.constants import FeatureType, Strand
+from eris.constants import Effect, FeatureType, Strand
 from eris.graph import Edge, TopologyEngine
-from eris.interval import IntervalBatch
+from eris.interval import Context, IntervalBatch
 from eris.io import GenomeAssembly, format_contig_path
 from eris.pipeline import LocusBuilder, Locus, GenomicFeature, LocationSegment
 
@@ -225,6 +225,32 @@ def test_upstream_flank_across_a_link_entered_backwards_counts_the_overlap_once(
     [locus] = builder.assemble(alignments)
 
     assert [f.distance_bp for f in locus.upstream_flanks] == [300]
+
+
+def test_a_gene_starting_in_a_link_overlap_before_the_is_end_overlaps_it_downstream():
+    # The IS ends at ctgA's end; ctgB starts at ctgA's 900, so ctgB's gene at 30 sits at 930, 70 bp inside the IS
+    builder = _flank_builder({"ctgA": 1000, "ctgB": 1000},
+                             [Edge("ctgA", Strand.FORWARD, "ctgB", Strand.FORWARD, overlap=100)],
+                             {"ctgB": (30, 600)})
+    alignments = {"ctgA": _batch([("IS1", 200, 0, 200, "ctgA", 1000, 800, 1000, 200, 200)])}
+
+    [locus] = builder.assemble(alignments)
+
+    assert [(f.spatial, f.distance_bp, f.effect) for f in locus.downstream_flanks] == [
+        (Context.OVERLAPPING_END, 0, Effect.DISRUPTED)]
+
+
+def test_a_gene_ending_in_a_link_overlap_after_the_is_start_overlaps_it_upstream():
+    # ctgA starts at ctgB's 900; ctgB's gene ending at 960 runs 60 bp into the IS at ctgA's start
+    builder = _flank_builder({"ctgA": 1000, "ctgB": 1000},
+                             [Edge("ctgB", Strand.FORWARD, "ctgA", Strand.FORWARD, overlap=100)],
+                             {"ctgB": (300, 960)})
+    alignments = {"ctgA": _batch([("IS1", 200, 0, 200, "ctgA", 1000, 0, 200, 200, 200)])}
+
+    [locus] = builder.assemble(alignments)
+
+    assert [(f.spatial, f.distance_bp, f.effect) for f in locus.upstream_flanks] == [
+        (Context.OVERLAPPING_START, 0, Effect.DISRUPTED)]
 
 
 def test_flank_two_links_away_counts_each_overlap_once():

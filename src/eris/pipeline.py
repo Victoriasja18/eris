@@ -22,6 +22,10 @@ from eris.copy_number import CopyNumber, assign_copy_numbers, covers_contig
 from eris.synonyms import SynonymResolver
 
 
+# The context of a flank that overlaps the target's end on the side it was searched from
+OVERLAPPING_SIDE = {Context.UPSTREAM: Context.OVERLAPPING_START, Context.DOWNSTREAM: Context.OVERLAPPING_END}
+
+
 # DataClasses ----------------------------------------------------------------------------------------------------------
 @dataclass(slots=True)
 class LocationSegment:
@@ -349,11 +353,15 @@ class LocusBuilder:
                             target_bounds):
                         continue
                     if walk_direction == -1:
-                        d = max(0, boundary + batch.starts[i] - self.genome.contig_lengths[contig])
+                        gap = boundary + batch.starts[i] - self.genome.contig_lengths[contig]
                     else:
-                        d = max(0, batch.starts[i] - boundary)
+                        gap = batch.starts[i] - boundary
+                    # A gene that starts in a link's shared overlap before the target's end overlaps the target,
+                    # like one on the target's own contig crossing that end; an overlap is reported as distance 0
+                    spatial = OVERLAPPING_SIDE[context] if gap < 0 else context
                     dest_list.append(
-                        self._resolve_relation(s_ctg, i, batch, context, int(d), node_depth, target_strand, target_bounds)
+                        self._resolve_relation(s_ctg, i, batch, spatial, int(max(0, gap)), node_depth, target_strand,
+                                               target_bounds)
                     )
 
     def _build_local(self, contig: str, alignment_batch: 'AlignmentBatch', gene_intervals: 'IntervalBatch') -> list[
